@@ -70,7 +70,11 @@ jobs:
           node-version: '20'
 
       - name: Install system packages (FFmpeg, Fonts, Chromium libs for Remotion)
-        run: | sudo apt-get update -qq sudo apt-get install -y -qq ffmpeg fonts-dejavu-core libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libcups2 libatk-bridge2.0-0 libxkbcommon-dev libxrandr2 libxfixes3 libxcomposite1 libxdamage1 libpango-1.0-0 libcairo2 sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2 
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libcups2 libatk-bridge2.0-0 libxkbcommon-dev libxrandr2 libxfixes3 libxcomposite1 libxdamage1 libpango-1.0-0 libcairo2
+          sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2
+
       - name: Cache HuggingFace Whisper models
         uses: actions/cache@v4
         with:
@@ -78,9 +82,14 @@ jobs:
           key: hf-whisper-${{ runner.os }}-small-v1
 
       - name: Install Python dependencies
-        run: | pip install --upgrade pip pip install -r requirements.txt 
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Setup & Cache Remotion environment
-        run: | python -c "import remotion_builder; remotion_builder.prepare_remotion_project('/tmp/remotion_overlay')" 
+        run: |
+          python -c "import remotion_builder; remotion_builder.prepare_remotion_project('/tmp/remotion_overlay')"
+
       - name: Cache Remotion node_modules
         id: cache-remotion
         uses: actions/cache@v4
@@ -90,7 +99,9 @@ jobs:
 
       - name: Install Remotion npm packages (jika belum ada di cache)
         if: steps.cache-remotion.outputs.cache-hit != 'true'
-        run: | cd /tmp/remotion_overlay && npm install --no-audit --no-fund 
+        run: |
+          cd /tmp/remotion_overlay && npm install --no-audit --no-fund
+
       - name: Jalankan Pipeline Render
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -106,4 +117,5 @@ jobs:
           INPUT_NOTE: ${{ github.event.inputs.note }}
           INPUT_EDIT_CMD: ${{ github.event.inputs.edit_cmd }}
           INPUT_CHAT_ID: ${{ github.event.inputs.chat_id }}
-        run: | python main.py
+        run: |
+          python main.py
