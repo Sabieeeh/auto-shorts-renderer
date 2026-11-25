@@ -22,6 +22,9 @@ STILL_DUR = 5.0          # durasi klip dari gambar diam (detik)
 STILL_KB_END = 1.08      # Ken Burns gambar: skala akhir (awal = 1.0)
 DRIFT = 0.06             # micro-zoom drift per shot video (1.0 -> 1.06)
 CUT_FRAMES = 6           # panjang transisi whip-pan / cross-zoom di tepi shot
+GRAIN = 3               # kekuatan film grain di komposit akhir (0 = mati); grain besar membengkakkan ukuran file
+FINAL_CRF = 23           # kualitas encode akhir
+FINAL_MAXRATE = "9M"     # batas bitrate -> 40 detik sekitar 45 MB
 OVERLAY_MAX = 8          # maksimal overlay per video (termasuk hook & CTA)
 OVERLAY_MIN_GAP = 5.0    # jeda minimal (detik) antara akhir satu overlay dan awal berikutnya
 
@@ -908,7 +911,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     # Global adjustment layer (paling atas): vignette sinematik + film grain halus
     fc_final = (
         "[1:v]format=rgba[ov];[0:v][ov]overlay=0:0:format=auto,format=yuv420p,"
-        "vignette=angle=PI/4.5,noise=alls=12:allf=t[v]"
+        "vignette=angle=PI/4.5" + (f",noise=alls={GRAIN}:allf=t" if GRAIN else "") + "[v]"
     )
     ov_in = ["-c:v", "libvpx-vp9", "-i", overlay_file] if used_codec == "vp9" else ["-i", overlay_file]
     sh(
@@ -917,7 +920,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         + [
             "-i", mix_wav, "-filter_complex", fc_final,
             "-map", "[v]", "-map", "2:a", "-frames:v", str(n_frames),
-            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+            "-c:v", "libx264", "-crf", str(FINAL_CRF), "-maxrate", FINAL_MAXRATE, "-bufsize", "18M", "-preset", "medium", "-pix_fmt", "yuv420p",
             "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart", final_mp4,
         ]
