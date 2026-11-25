@@ -16,6 +16,15 @@ from remotion_builder import prepare_remotion_project, download_geo_assets
 
 FPS, W, H = 30, 1080, 1920
 
+IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
+VID_EXT = (".mov", ".mp4")
+STILL_DUR = 5.0          # durasi klip dari gambar diam (detik)
+STILL_KB_END = 1.08      # Ken Burns gambar: skala akhir (awal = 1.0)
+DRIFT = 0.06             # micro-zoom drift per shot video (1.0 -> 1.06)
+CUT_FRAMES = 6           # panjang transisi whip-pan / cross-zoom di tepi shot
+OVERLAY_MAX = 8          # maksimal overlay per video (termasuk hook & CTA)
+OVERLAY_MIN_GAP = 5.0    # jeda minimal (detik) antara akhir satu overlay dan awal berikutnya
+
 THEMES = {
     "hutan": dict(g=(31, 61, 43), d=(22, 46, 32), m=(45, 92, 67), c=(242, 232, 213), a=(224, 138, 46), k=(17, 17, 17), v=(8, 20, 13)),
     "laut": dict(g=(14, 42, 71), d=(9, 29, 51), m=(28, 74, 115), c=(234, 244, 250), a=(255, 183, 3), k=(8, 14, 24), v=(4, 12, 22)),
@@ -44,7 +53,11 @@ def probe(path: str) -> dict:
     v = next((s for s in j.get("streams", []) if s.get("codec_type") == "video"), None)
     a = next((s for s in j.get("streams", []) if s.get("codec_type") == "audio"), None)
     raw_dur = j.get("format", {}).get("duration") or (v.get("duration") if v else None) or 0.0
-    info = {"dur": float(raw_dur)}
+    try:
+        dur_val = float(raw_dur)
+    except (TypeError, ValueError):
+        dur_val = 0.0
+    info = {"dur": dur_val}
     if v:
         rot = int(float(next((sd["rotation"] for sd in v.get("side_data_list", []) if "rotation" in sd), v.get("tags", {}).get("rotate", 0))))
         w, h = int(v["width"]), int(v["height"])
@@ -54,6 +67,91 @@ def probe(path: str) -> dict:
     if a:
         info["ch"] = int(a["channels"])
     return info
+
+
+def still_to_clip(src: str, out_p: str, dur: float = STILL_DUR) -> bool:
+    """Ubah gambar diam (mis. tangkapan layar berita) menjadi klip mp4 1080x1920 30 fps.
+
+    Latar: versi gambar yang di-blur (boxblur=25:5) memenuhi layar 9:16.
+    Depan: gambar tajam di tengah, dibuat membesar halus 1.0 -> 1.08 (Ken Burns)
+    tanpa terpotong. Ukuran akhir gambar tajam maksimal 1080x1620.
+    """
+    try:
+        info = probe(src)
+        iw, ih = int(info.get("w") or 0), int(info.get("h") or 0)
+        if iw <= 0 or ih <= 0:
+            return False
+        sc = min(W / iw, 1620 / ih)
+        fw, fh = max(2, int(iw * sc) // 2 * 2), max(2, int(ih * sc) // 2 * 2)
+        k0 = 1.0 / STILL_KB_END
+        grow = f"({k0:.5f}+(1-{k0:.5f})*t/{dur:.3f})"
+        fc = (
+            "[0:v]format=rgba,split=2[a][b];"
+            f"[a]format=rgb24,scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=25:5,eq=brightness=-0.10[bg];"
+            f"[b]scale={fw}:{fh}:flags=lanczos[fg0];"
+            f"[fg0]scale=w='trunc({fw}*{grow}/2)*2':h='trunc({fh}*{grow}/2)*2':eval=frame:flags=lanczos[fg];"
+            "[bg][fg]overlay=x='(W-w)/2':y='(H-h)/2':format=auto,format=yuv420p[v]"
+        )
+        n = int(round(dur * FPS))
+        sh([
+            "ffmpeg", "-y", "-v", "error", "-loop", "1", "-framerate", str(FPS), "-t", f"{dur:.3f}", "-i", src,
+            "-filter_complex", fc, "-map", "[v]", "-frames:v", str(n), "-r", str(FPS),
+            "-c:v", "libx264", "-crf", "16", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-an", out_p,
+        ])
+        return os.path.exists(out_p) and os.path.getsize(out_p) > 1000
+    except Exception as e:
+        print(f"(!) Gagal konversi gambar {os.path.basename(src)}: {str(e)[:200]}")
+        return False
+
+
+def prepare_still_clips(clips: list, work_dir: str) -> list:
+    """Konversi semua klip gambar menjadi mp4 sementara sebelum masuk ke timeline."""
+    still_dir = os.path.join(work_dir, "stills")
+    os.makedirs(still_dir, exist_ok=True)
+    for c in clips:
+        if not c.get("is_img"):
+            continue
+        out_p = os.path.join(still_dir, f"{c['key']}.mp4")
+        if os.path.exists(out_p) or still_to_clip(c["path"], out_p):
+            c.update(path=out_p, dur=STILL_DUR, is_img=False, vertical=True, still=True)
+            print("Gambar -> klip:", c["name"])
+        else:
+            c["dur"] = STILL_DUR
+    return clips
+
+
+def cut_kind(i: int) -> str:
+    """Jenis transisi pada sambungan shot i -> i+1: selang-seling cross-zoom dan whip-pan."""
+    return "zoom" if i % 2 == 0 else "whip"
+
+
+def motion_filter(fr: int, drift: float, kin, kout, src_scale: bool = True) -> str:
+    """zoompan: micro-zoom drift + transisi whip-pan / optical cross-zoom di tepi shot."""
+    n = CUT_FRAMES
+    terms = []
+    if drift:
+        terms.append(f"{drift}*on/{max(fr - 1, 1)}")
+    xs, blurs = [], []
+    if kout:
+        pr = f"max(0,(on-({fr}-{n}))/{n})"
+        terms.append(f"{0.22 if kout == 'zoom' else 0.26}*pow({pr},2)")
+        if kout == "whip":
+            xs.append(f"+0.075*iw*pow({pr},2)")
+            blurs.append(f"gblur=sigma=28:sigmaV=0.01:enable='gt(n,{fr - n - 1})'")
+        else:
+            blurs.append(f"gblur=sigma=10:enable='gt(n,{fr - n - 1})'")
+    if kin:
+        pr = f"max(0,({n}-on)/{n})"
+        terms.append(f"{0.22 if kin == 'zoom' else 0.26}*pow({pr},2)")
+        if kin == "whip":
+            xs.append(f"-0.075*iw*pow({pr},2)")
+            blurs.append(f"gblur=sigma=28:sigmaV=0.01:enable='lt(n,{n})'")
+        else:
+            blurs.append(f"gblur=sigma=10:enable='lt(n,{n})'")
+    z = "1+" + "+".join(terms) if terms else "1"
+    x = "iw/2-(iw/zoom/2)" + "".join(xs)
+    zp = f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}"
+    return ",".join([zp] + blurs)
 
 
 def measure(path: str):
@@ -263,9 +361,9 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
 def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float) -> list:
     default_dur = {"lower": 2.4, "icon": 3.0, "qmark": 2.0, "big": 2.6, "solid": 3.0, "quote": 4.0, "list": 3.8, "produk": 4.0, "map": 3.6}
     ovs = []
-    extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.0, "sfx": "hit"}] if hook_lines else []
+    extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
     if cta_text:
-        extra.append({"type": "big", "at": max(0.0, dur - 2.6), "lines": [cta_text], "dur": 2.5, "sfx": "hit"})
+        extra.append({"type": "big", "at": max(0.0, dur - 2.6), "lines": [cta_text], "dur": 2.5, "sfx": "hit", "_fixed": True})
 
     for o in extra + overlays:
         o = json.loads(json.dumps(o))
@@ -297,8 +395,31 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
             o["t0"] = words[i]["t0"]
         ovs.append(o)
 
+    # Ruang bernapas: maksimal OVERLAY_MAX overlay, jeda minimal OVERLAY_MIN_GAP detik.
+    # Hook & CTA selalu dipertahankan; sisanya dipilih menurut prioritas tipe.
+    prio = {"map": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3}
+
+    def _span(o):
+        return o["t0"], o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8))
+
+    def _clash(a, b):
+        (a0, a1), (b0, b1) = _span(a), _span(b)
+        return a0 < b1 + OVERLAY_MIN_GAP and b0 < a1 + OVERLAY_MIN_GAP
+
+    kept = [o for o in ovs if o.get("_fixed")]
+    for o in sorted((o for o in ovs if not o.get("_fixed")), key=lambda o: (prio.get(o["type"], 2), o["t0"])):
+        if len(kept) >= OVERLAY_MAX:
+            print(f"[overlay] dilewati (melebihi batas {OVERLAY_MAX}): {o['type']} @ {o['t0']:.1f}s")
+            continue
+        if any(_clash(o, k) for k in kept):
+            print(f"[overlay] dilewati (terlalu rapat, jeda < {OVERLAY_MIN_GAP:.0f}s): {o['type']} @ {o['t0']:.1f}s")
+            continue
+        kept.append(o)
+    ovs = kept
+
     ovs.sort(key=lambda o: o["t0"])
     for k, o in enumerate(ovs):
+        o.pop("_fixed", None)
         nxt = ovs[k + 1]["t0"] - 0.1 if k + 1 < len(ovs) else dur
         o["t1"] = min(o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8)), nxt, dur)
         for it in o.get("items", []):
@@ -326,7 +447,7 @@ CATATAN GAYA & PROYEK:
 
 ATURAN WAJIB:
 1. Pilih "theme" paling cocok dari: "api", "hutan", "bumi", "laut", "malam".
-2. Buat 12 sampai 15 item di array "overlays" (jangan lebih dari 15 agar visual B-roll tetap lega). Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
+2. Buat 6 sampai 8 item di array "overlays" (JANGAN lebih dari 8; B-roll dokumenter dan kliping berita harus tetap dominan, dan tiap overlay berjarak minimal ~8 detik dari yang lain). Pilih hanya momen penekanan paling strategis. Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
 3. Variasikan "type" overlay (batasi tipe "icon" maksimal 2-3 kali saja, utamakan "big", "lower", "list", dan "qmark"):
    - "big": {{"type":"big", "trigger":"...", "lines":["BARIS 1", "BARIS 2"]}} (maks 2-3 baris pendek, kapitals)
    - "lower": {{"type":"lower", "trigger":"...", "badge":"SOROTAN FAKTA", "text":"TEKS SINGKAT"}}
@@ -354,16 +475,18 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
     os.makedirs(frames_root, exist_ok=True)
     cands = [
         p for p in sorted(glob.glob(f"{proj_dir}/*"))
-        if p.lower().endswith((".mov", ".mp4", ".jpg", ".jpeg", ".png", ".webp"))
+        if p.lower().endswith(VID_EXT + IMG_EXT)
         and not any(x in os.path.basename(p).lower() for x in ("output_", "short_"))
     ]
     clips = []
     for p in cands:
         name = os.path.basename(p)
         info = probe(p)
-        is_img = p.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
-        if is_img and info.get("dur", 0) <= 0:
-            info["dur"] = 5.0
+        is_img = p.lower().endswith(IMG_EXT)
+        if is_img:
+            # ffprobe melaporkan ~0.04 dtk untuk gambar diam; tanpa koreksi ini gambar
+            # selalu ditolak pick_shot() karena dianggap terlalu pendek.
+            info["dur"] = STILL_DUR
         key = re.sub(r"\W", "_", name)
         info.update(path=p, name=name, key=key, is_img=is_img)
         d = os.path.join(frames_root, key)
@@ -580,6 +703,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         if not any(ex in c["name"].lower() for ex in excluded)
     ]
     assert clips, "Tidak ada klip B-roll tersisa untuk dirender!"
+    clips = prepare_still_clips(clips, work_dir)
 
     # 1. Potong & susun B-roll
     hook_cut, body_cut, hook_window = 1.4, 2.4, 3.0
@@ -650,22 +774,30 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     def render_shot(s):
         c, fr = s["clip"], s["frames"]
         out_p = os.path.join(shots_dir, f"s{s['i']:03d}.mp4")
-        z = 0.09 if s["t"] < hook_window else 0.04 + 0.01 * (s["i"] % 3)
-        zp = lambda size: f"zoompan=z='1+{z}*on/{fr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={size}:fps=30"
+        kin = cut_kind(s["i"] - 1) if s["i"] > 0 else None
+        kout = cut_kind(s["i"]) if s["i"] < n_sh - 1 else None
+        still = bool(c.get("still"))
+        drift = 0.0 if still else DRIFT   # klip gambar sudah punya Ken Burns sendiri
         pre = ["-stream_loop", "-1"] if s["loop"] else []
         if c["is_img"]:
             pre = ["-loop", "1"]
         base = ["ffmpeg", "-y", "-v", "error"] + pre + ["-ss", f"{s['ss']:.3f}", "-t", f"{s['dur'] + 0.4:.3f}", "-i", c["path"], "-an"]
         out = ["-frames:v", str(fr), "-r", "30", "-c:v", "libx264", "-crf", "16", "-preset", "ultrafast", "-pix_fmt", "yuv420p", out_p]
         if c.get("vertical", True):
-            vf = f"fps=30,{grade},scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,{zp('1080x1920')},format=yuv420p"
+            g = "" if still else f"{grade},"
+            vf = (
+                f"fps=30,{g}scale=1620:2880:force_original_aspect_ratio=increase,crop=1620:2880,"
+                f"{motion_filter(fr, drift, kin, kout)},format=yuv420p"
+            )
             sh(base + ["-vf", vf] + out)
         else:
+            zp = f"zoompan=z='1+{DRIFT}*on/{max(fr - 1, 1)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=880x495:fps=30"
             fc = (
                 f"[0:v]fps=30,{grade},split=2[a][b];"
                 f"[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=40:6,eq=brightness=-0.12[bg];"
-                f"[b]scale=880:495:force_original_aspect_ratio=increase,crop=880:495,{zp('880x495')}[fg];"
-                f"[bg][fg]overlay=100:433[t];[t][1:v]overlay=0:0:format=auto,format=yuv420p[v]"
+                f"[b]scale=880:495:force_original_aspect_ratio=increase,crop=880:495,{zp}[fg];"
+                f"[bg][fg]overlay=100:433[t];[t][1:v]overlay=0:0:format=auto,format=yuv420p[v0];"
+                f"[v0]scale=1620:2880,{motion_filter(fr, 0.0, kin, kout)},format=yuv420p[v]"
             )
             inp = base[:-1] + ["-loop", "1", "-i", phone_png, "-an"]
             sh(inp + ["-filter_complex", fc, "-map", "[v]"] + out)
@@ -695,20 +827,42 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         "hex": {"green": _hex(_t["g"]), "dark": _hex(_t["d"]), "mid": _hex(_t["m"]), "cream": _hex(_t["c"]), "orange": _hex(_t["a"]), "black": _hex(_t["k"])},
         "vars": {"--g": "%d,%d,%d" % _t["g"], "--d": "%d,%d,%d" % _t["d"], "--a": "%d,%d,%d" % _t["a"], "--c": "%d,%d,%d" % _t["c"], "--v": "%d,%d,%d" % _t["v"]},
     }
-    props = {"overlays": ovs, "fps": FPS, "durationInFrames": n_frames, "images": [], "captions": caps, "theme": t_props}
-    with open(f"{remo_dir}/props.json", "w") as fh:
-        json.dump(props, fh, sort_keys=True)
+    # Salinan buram video dasar -> latar kartu "glassmorphism" (blur sungguhan di belakang kartu)
+    glass_src = None
+    try:
+        blur_p = f"{remo_dir}/public/base_blur.mp4"
+        sh([
+            "ffmpeg", "-y", "-v", "error", "-i", base_mp4,
+            "-vf", "scale=270:480:flags=area,gblur=sigma=2.2,scale=1080:1920:flags=bicubic,eq=brightness=-0.04",
+            "-an", "-c:v", "libx264", "-crf", "24", "-preset", "veryfast", "-g", "15", "-pix_fmt", "yuv420p", blur_p,
+        ])
+        glass_src = "base_blur.mp4"
+    except Exception as e:
+        print(f"[peringatan] Latar kaca buram dilewati: {str(e)[:200]}")
 
     conc = max(2, min(4, os.cpu_count() or 2))
-    overlay_file = f"{remo_dir}/out/overlay.webm"
-    used_codec = "vp9"
+
+    def render_overlay(glass):
+        props = {"overlays": ovs, "fps": FPS, "durationInFrames": n_frames, "images": [], "captions": caps, "theme": t_props, "glassSrc": glass}
+        with open(f"{remo_dir}/props.json", "w") as fh:
+            json.dump(props, fh, sort_keys=True)
+        ov_file, codec = f"{remo_dir}/out/overlay.webm", "vp9"
+        try:
+            sh(f"cd {remo_dir} && npx remotion render src/index.ts Overlay {ov_file} --props=props.json --codec=vp9 --pixel-format=yuva420p --image-format=png --crf=18 --overwrite --concurrency={conc}")
+        except Exception as e:
+            print(f"[peringatan] VP9 gagal ({e}); beralih ke ProRes 4444...")
+            codec = "prores"
+            ov_file = f"{remo_dir}/out/overlay.mov"
+            sh(f"cd {remo_dir} && npx remotion render src/index.ts Overlay {ov_file} --props=props.json --codec=prores --prores-profile=4444 --pixel-format=yuva444p10le --image-format=png --overwrite --concurrency={conc}")
+        return ov_file, codec
+
     try:
-        sh(f"cd {remo_dir} && npx remotion render src/index.ts Overlay {overlay_file} --props=props.json --codec=vp9 --pixel-format=yuva420p --image-format=png --crf=18 --overwrite --concurrency={conc}")
+        overlay_file, used_codec = render_overlay(glass_src)
     except Exception as e:
-        print(f"[peringatan] VP9 gagal ({e}); beralih ke ProRes 4444...")
-        used_codec = "prores"
-        overlay_file = f"{remo_dir}/out/overlay.mov"
-        sh(f"cd {remo_dir} && npx remotion render src/index.ts Overlay {overlay_file} --props=props.json --codec=prores --prores-profile=4444 --pixel-format=yuva444p10le --image-format=png --overwrite --concurrency={conc}")
+        if glass_src is None:
+            raise
+        print(f"[peringatan] Render dengan latar kaca gagal ({str(e)[-300:]}); mengulang tanpa latar kaca...")
+        overlay_file, used_codec = render_overlay(None)
 
     # 3. Audio mix + SFX + Normalisasi -16 LUFS
     SR = 48000
@@ -751,7 +905,11 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")[:40] or "video"
     out_name = f"Short_{slug}.mp4"
     final_mp4 = os.path.join(work_dir, out_name)
-    fc_final = "[1:v]format=rgba[ov];[0:v][ov]overlay=0:0:format=auto,format=yuv420p[v]"
+    # Global adjustment layer (paling atas): vignette sinematik + film grain halus
+    fc_final = (
+        "[1:v]format=rgba[ov];[0:v][ov]overlay=0:0:format=auto,format=yuv420p,"
+        "vignette=angle=PI/4.5,noise=alls=12:allf=t[v]"
+    )
     ov_in = ["-c:v", "libvpx-vp9", "-i", overlay_file] if used_codec == "vp9" else ["-i", overlay_file]
     sh(
         ["ffmpeg", "-y", "-v", "error", "-i", base_mp4]

@@ -4,7 +4,7 @@ import time
 import urllib.request
 
 REMO_FILES = {
-    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","d3-geo":"3.1.1","topojson-client":"3.1.0"}}""",
+    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","d3-geo":"3.1.1","@remotion/google-fonts":"4.0.352"}}""",
     "tsconfig.json": r"""{"compilerOptions":{"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":false,"skipLibCheck":true,"esModuleInterop":true,"noEmit":true},"include":["src"]}""",
     "src/index.ts": r"""import {registerRoot} from "remotion";
 import {Root} from "./Root";
@@ -33,11 +33,21 @@ export const Root: React.FC = () => {
 """,
     "src/Overlay.tsx": r"""import React, {createContext, useContext, useEffect, useMemo, useState} from "react";
 import {
-  AbsoluteFill, Sequence, useCurrentFrame, useVideoConfig, spring, interpolate,
+  AbsoluteFill, Sequence, OffthreadVideo, useCurrentFrame, useVideoConfig, spring, interpolate,
   Easing, random, staticFile, delayRender, continueRender,
 } from "remotion";
-import {geoMercator, geoPath, geoContains} from "d3-geo";
-import {feature as topoFeature} from "topojson-client";
+import {geoMercator, geoPath, geoContains, geoGraticule} from "d3-geo";
+import {loadFont as loadMontserrat} from "@remotion/google-fonts/Montserrat";
+import {loadFont as loadOswald} from "@remotion/google-fonts/Oswald";
+import {loadFont as loadPlayfair} from "@remotion/google-fonts/PlayfairDisplay";
+
+const mont: any = loadMontserrat("normal", {weights: ["800"], subsets: ["latin"]});
+const osw: any = loadOswald("normal", {weights: ["700"], subsets: ["latin"]});
+const play: any = loadPlayfair("italic", {weights: ["700"], subsets: ["latin"]});
+
+const F_DISPLAY = `${mont.fontFamily}, 'DejaVu Sans', Verdana, sans-serif`;
+const F_COND = `${osw.fontFamily}, 'DejaVu Sans Condensed', 'DejaVu Sans', sans-serif`;
+const F_SERIF = `${play.fontFamily}, 'DejaVu Serif', Georgia, serif`;
 
 const DEFAULT_C = {
   green: "#1F3D2B", dark: "#162E20", cream: "#F2E8D5",
@@ -45,12 +55,23 @@ const DEFAULT_C = {
 };
 const ThemeCtx = createContext<any>(DEFAULT_C);
 const useC = () => useContext(ThemeCtx);
+const CfgCtx = createContext<any>({glass: null});
 
-const FONT = "'DejaVu Sans', Verdana, sans-serif";
 const clamp: any = {extrapolateLeft: "clamp", extrapolateRight: "clamp"};
+const SPR = {damping: 18, stiffness: 220, mass: 0.7};
 const up = (s: any) => String(s || "").toUpperCase();
 const fitSize = (txt: string, max: number, width: number) =>
-  Math.max(24, Math.min(max, width / (Math.max(txt.length, 1) * 0.74)));
+  Math.max(24, Math.min(max, width / (Math.max(txt.length, 1) * 0.78)));
+
+const titleCase = (s: any) =>
+  String(s || "").toLowerCase().replace(/(^|[\s\/\-])([a-z\u00e0-\u00ff])/g, (_m: string, a: string, b: string) => a + b.toUpperCase());
+
+const keyWord = (text: string): string => {
+  const ws = String(text || "").split(/\s+/).filter(Boolean);
+  let best = "";
+  for (const w of ws) if (w.replace(/[^A-Za-z0-9\u00c0-\u00ff]/g, "").length >= best.replace(/[^A-Za-z0-9\u00c0-\u00ff]/g, "").length) best = w;
+  return best;
+};
 
 const wrapLines = (rawLines: string[], maxChars = 18): string[] => {
   const out: string[] = [];
@@ -70,128 +91,197 @@ const wrapLines = (rawLines: string[], maxChars = 18): string[] => {
   return out.slice(0, 4);
 };
 
+/* ---------- Primitif animasi ---------- */
+
 const Scene: React.FC<any> = ({dur, children, moving = true}) => {
   const f = useCurrentFrame();
   const out = interpolate(f, [dur - 7, dur], [1, 0], clamp);
   const lift = moving ? interpolate(f, [dur - 7, dur], [0, -24], clamp) : 0;
   return (
-    <AbsoluteFill style={{opacity: out, transform: `translateY(${lift}px)`, fontFamily: FONT}}>
+    <AbsoluteFill style={{opacity: out, transform: `translateY(${lift}px)`, fontFamily: F_DISPLAY}}>
       {children}
     </AbsoluteFill>
   );
 };
 
-const Shine: React.FC<any> = ({start = 6, len = 18, alpha = 0.5}) => {
+// Masked line reveal: teks naik dari balik topeng overflow:hidden.
+const Reveal: React.FC<any> = ({delay = 0, children, style = {}, pad = "0.16em"}) => {
   const f = useCurrentFrame();
-  const p = interpolate(f, [start, start + len], [-0.3, 1.3], clamp);
+  const {fps} = useVideoConfig();
+  const p = Math.min(1, Math.max(0, spring({frame: f - delay, fps, config: SPR})));
   return (
-    <div style={{position: "absolute", left: 0, top: 0, right: 0, bottom: 0, overflow: "hidden", pointerEvents: "none"}}>
-      <div style={{
-        position: "absolute", top: -200, bottom: -200, width: 150, left: `${p * 100}%`,
-        transform: "skewX(-18deg)", filter: "blur(8px)",
-        background: `linear-gradient(90deg, transparent, rgba(255,255,255,${alpha}), transparent)`,
-      }} />
+    <div style={{overflow: "hidden", padding: `${pad} 0`, margin: `-${pad} 0`, ...style}}>
+      <div style={{transform: `translateY(${(1 - p) * 110}%)`}}>{children}</div>
     </div>
   );
 };
+
+// Sapuan highlighter marker di belakang kata kunci.
+const Mark: React.FC<any> = ({delay = 0, color, alpha = 0.96, children}) => {
+  const f = useCurrentFrame();
+  const w = interpolate(f, [delay, delay + 10], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
+  return (
+    <span style={{position: "relative", display: "inline-block", padding: "0 0.26em"}}>
+      <span style={{
+        position: "absolute", left: 0, right: 0, top: "10%", bottom: "2%",
+        background: color, opacity: alpha, borderRadius: 6,
+        transformOrigin: "0 50%", transform: `scaleX(${w}) skewX(-6deg)`,
+      }} />
+      <span style={{position: "relative"}}>{children}</span>
+    </span>
+  );
+};
+
+// Teks dengan satu kata kunci diberi marker.
+const MarkedText: React.FC<any> = ({text, delay = 6, color, ink}) => {
+  const key = keyWord(text);
+  const idx = key ? text.lastIndexOf(key) : -1;
+  if (idx < 0 || text.trim().split(/\s+/).length < 2) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <Mark delay={delay} color={color}><span style={{color: ink, WebkitTextStroke: "0px transparent"} as any}>{key}</span></Mark>
+      {text.slice(idx + key.length)}
+    </>
+  );
+};
+
+// Dimming vignette lembut (khusus saat kartu list / map tampil).
+const Dim: React.FC<any> = ({dur}) => {
+  const f = useCurrentFrame();
+  const a = Math.min(interpolate(f, [0, 8], [0, 1], clamp), interpolate(f, [dur - 8, dur], [1, 0], clamp));
+  return (
+    <AbsoluteFill style={{
+      opacity: a,
+      background: "radial-gradient(ellipse at 50% 50%, rgba(0,0,0,0.38) 0%, rgba(0,0,0,0.38) 55%, rgba(0,0,0,0.5) 100%)",
+    }} />
+  );
+};
+
+// Kartu glassmorphism. Blur sungguhan memakai salinan buram video dasar (glassSrc);
+// jika tidak tersedia, kartu tetap semi-transparan gelap.
+const Glass: React.FC<any> = ({o, x, y, w, h, radius = 26, style = {}, children}) => {
+  const {glass} = useContext(CfgCtx);
+  const {fps} = useVideoConfig();
+  const from = Math.round(((o && o.t0) || 0) * fps);
+  return (
+    <div style={{
+      position: "absolute", left: x, top: y, width: w, height: h, borderRadius: radius,
+      overflow: "hidden", boxSizing: "border-box",
+      background: "rgba(10,14,12,0.44)",
+      backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+      border: "1px solid rgba(255,255,255,0.22)",
+      boxShadow: "0 2px 6px rgba(0,0,0,0.35), 0 18px 40px rgba(0,0,0,0.42), 0 44px 96px rgba(0,0,0,0.32)",
+      ...style,
+    } as any}>
+      {glass ? (
+        <div style={{position: "absolute", left: -x, top: -y, width: 1080, height: 1920}}>
+          <OffthreadVideo src={staticFile(glass)} startFrom={from} style={{width: 1080, height: 1920, objectFit: "cover"}} />
+        </div>
+      ) : null}
+      <div style={{position: "absolute", left: 0, top: 0, right: 0, bottom: 0, background: "linear-gradient(145deg, rgba(var(--d),.50) 0%, rgba(8,12,10,.60) 100%)"}} />
+      <div style={{position: "absolute", left: 0, right: 0, top: 0, height: 1, background: "linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent)"}} />
+      {children}
+    </div>
+  );
+};
+
+/* ---------- Big: judul tegas + kalimat pembanding serif ---------- */
 
 const Big: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
   const {fps} = useVideoConfig();
   const lines: string[] = wrapLines(o.lines || [], 16);
-  const shakeAmp = (1 - interpolate(f, [0, 12], [0, 1], clamp)) * 8;
-  const sx = Math.sin(f * 2.7) * shakeAmp;
-  const sy = Math.cos(f * 3.1) * shakeAmp;
-  const sBar = spring({frame: f - lines.length * 4, fps, config: {damping: 14, stiffness: 150}});
-  const bgOp = interpolate(f, [0, 6], [0, 1], clamp);
+  const starIdx = lines.findIndex((l) => l.startsWith("*"));
+  const accentIdx = starIdx >= 0 ? starIdx : (lines.length > 1 ? lines.length - 1 : -1);
+  const sBar = Math.min(1, spring({frame: f - lines.length * 4 - 4, fps, config: SPR}));
+  const bgOp = interpolate(f, [0, 8], [0, 1], clamp);
   return (
     <Scene dur={dur}>
       <div style={{
-        position: "absolute", left: 50, right: 50, top: 340, height: 680,
-        borderRadius: 36, opacity: bgOp,
-        background: "radial-gradient(ellipse at center, rgba(12,18,15,0.72) 0%, rgba(12,18,15,0.0) 75%)",
+        position: "absolute", left: 40, right: 40, top: 330, height: 700, opacity: bgOp,
+        background: "radial-gradient(ellipse at center, rgba(8,12,10,0.66) 0%, rgba(8,12,10,0) 72%)",
       }} />
       <div style={{
-        position: "absolute", left: 60, right: 60, top: 340, height: 680,
+        position: "absolute", left: 60, right: 60, top: 330, height: 700,
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-        transform: `translate(${sx}px, ${sy}px)`,
       }}>
-        {lines.map((l, i) => {
-          const s = spring({frame: f - i * 4, fps, config: {damping: 10, stiffness: 190, mass: 0.6}});
-          const sc = Math.min(1, s);
-          const size = Math.min(108, Math.max(46, 860 / (Math.max(l.length, 4) * 0.74)));
-          const isAccent = i === lines.length - 1 && lines.length > 1;
+        {lines.map((raw, i) => {
+          const l = raw.replace(/^\*/, "");
+          const accent = i === accentIdx;
+          const size = accent
+            ? Math.min(104, Math.max(46, 860 / (Math.max(l.length, 4) * 0.6)))
+            : Math.min(112, Math.max(46, 860 / (Math.max(l.length, 4) * 0.8)));
+          const single = lines.length === 1;
           return (
-            <div key={i} style={{
-              fontWeight: 800, fontSize: size, lineHeight: 1.16,
-              color: isAccent ? C.orange : C.cream, letterSpacing: 1.5,
-              textAlign: "center", maxWidth: 920,
-              transform: `scale(${interpolate(s, [0, 1], [2.1, 1])}) rotate(${interpolate(s, [0, 1], [i % 2 ? 5 : -5, 0])}deg)`,
-              opacity: Math.min(1, s * 2.2),
-              filter: `blur(${(1 - sc) * 12}px)`,
-              WebkitTextStroke: `8px ${C.black}`,
-              paintOrder: "stroke fill",
-              textShadow: `0 8px 34px rgba(0,0,0,0.85), 0 0 36px rgba(var(--a),${0.55 * sc})`,
-            } as any}>{l}</div>
+            <Reveal key={i} delay={i * 4} style={{textAlign: "center", maxWidth: 940}}>
+              <div style={{
+                fontFamily: accent ? F_SERIF : F_DISPLAY, fontStyle: accent ? "italic" : "normal",
+                fontWeight: accent ? 700 : 800, fontSize: size, lineHeight: 1.12,
+                color: accent ? C.black : C.cream, letterSpacing: accent ? 0 : 1.5,
+                WebkitTextStroke: accent ? "0px transparent" : `8px ${C.black}`, paintOrder: "stroke fill",
+                textShadow: accent ? "none" : "0 8px 34px rgba(0,0,0,0.85)",
+                textAlign: "center", padding: "2px 0",
+              } as any}>
+                {accent ? (
+                  <Mark delay={i * 4 + 6} color={C.orange}>{l}</Mark>
+                ) : single ? (
+                  <MarkedText text={l} delay={8} color={C.orange} ink={C.black} />
+                ) : l}
+              </div>
+            </Reveal>
           );
         })}
         <div style={{
-          marginTop: 24, height: 12, borderRadius: 6,
-          background: `linear-gradient(90deg, ${C.orange}, ${C.cream})`,
-          width: 520 * Math.min(1, sBar), boxShadow: "0 0 24px rgba(var(--a),.85)",
+          marginTop: 26, height: 6, borderRadius: 3,
+          background: `linear-gradient(90deg, transparent, ${C.orange}, ${C.cream}, transparent)`,
+          width: 560 * sBar,
         }} />
       </div>
-      <Shine start={6} alpha={0.35} />
     </Scene>
   );
 };
+
+/* ---------- Lower: kartu kaca dengan garis aksen vertikal ---------- */
 
 const Lower: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const s = Math.min(1, spring({frame: f, fps, config: {damping: 15, stiffness: 150, mass: 0.8}}));
-  const t = Math.min(1, spring({frame: f - 5, fps, config: {damping: 17, stiffness: 150}}));
+  const s = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
   const prog = interpolate(f, [0, dur], [0, 100], clamp);
   const badge = up(o.badge || "SOROTAN FAKTA");
+  const lines = wrapLines([up(o.text)], 22).slice(0, 2).map((l) => l.replace(/^\*/, ""));
+  const size = fitSize(lines.reduce((a, b) => (a.length >= b.length ? a : b), ""), 44, 820);
   return (
     <Scene dur={dur} moving={false}>
-      <div style={{
-        position: "absolute", left: 60, right: 60, top: 880,
-        transform: `translateX(${(1 - s) * -70}px) scale(${0.94 + 0.06 * s})`,
-        opacity: Math.min(1, s * 1.6),
-      }}>
-        <div style={{
-          position: "relative", borderRadius: 24, overflow: "hidden",
-          background: "linear-gradient(135deg, rgba(var(--d),.94) 0%, rgba(var(--g),.90) 100%)",
-          border: `2px solid rgba(var(--a),.75)`,
-          boxShadow: "0 20px 50px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.18)",
-          padding: "18px 28px 22px 28px",
-        }}>
-          <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 10}}>
-            <div style={{
-              width: 12, height: 12, borderRadius: 6, background: C.orange,
-              boxShadow: `0 0 12px ${C.orange}`,
-            }} />
-            <div style={{fontWeight: 800, fontSize: 22, letterSpacing: 2, color: C.orange}}>{badge}</div>
-          </div>
-          <div style={{overflow: "hidden"}}>
-            <div style={{
-              fontWeight: 800, fontSize: fitSize(up(o.text), 42, 860), color: C.cream,
-              lineHeight: 1.28, transform: `translateY(${(1 - t) * 45}px)`,
-            }}>{up(o.text)}</div>
-          </div>
+      <Glass o={o} x={60} y={880} w={960} style={{transform: `translateX(${(1 - s) * -80}px)`, opacity: Math.min(1, s * 1.6)}}>
+        <div style={{position: "relative", padding: "24px 34px 30px 46px"}}>
           <div style={{
-            position: "absolute", left: 0, bottom: 0, height: 6,
-            width: `${prog}%`, background: `linear-gradient(90deg, ${C.orange}, ${C.cream})`,
+            position: "absolute", left: 22, top: 24, bottom: 30, width: 6, borderRadius: 3,
+            background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.25))`,
+            boxShadow: `0 0 16px rgba(var(--a),.6)`,
           }} />
-          <Shine start={8} alpha={0.35} />
+          <Reveal delay={2}>
+            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 25, letterSpacing: 4, color: C.orange}}>{badge}</div>
+          </Reveal>
+          <div style={{height: 10}} />
+          {lines.map((l, i) => (
+            <Reveal key={i} delay={6 + i * 4}>
+              <div style={{fontWeight: 800, fontSize: size, color: C.cream, lineHeight: 1.22}}>
+                <MarkedText text={l} delay={14 + i * 4} color={C.orange} ink={C.black} />
+              </div>
+            </Reveal>
+          ))}
         </div>
-      </div>
+        <div style={{position: "absolute", left: 0, bottom: 0, height: 4, width: `${prog}%`, background: `linear-gradient(90deg, ${C.orange}, ${C.cream})`}} />
+      </Glass>
     </Scene>
   );
 };
+
+/* ---------- List: kartu kaca + item masked reveal ---------- */
 
 const List: React.FC<any> = ({o, dur}) => {
   const C = useC();
@@ -199,59 +289,59 @@ const List: React.FC<any> = ({o, dur}) => {
   const {fps} = useVideoConfig();
   const items: any[] = o.items || [];
   const n = Math.max(items.length, 1);
-  const h = Math.min(440, 96 + 98 * n);
+  const h = Math.min(520, 120 + 104 * n);
   const top = 1040 - h;
-  const p = Math.min(1, spring({frame: f, fps, config: {damping: 15, stiffness: 150}}));
+  const p = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
   return (
-    <Scene dur={dur}>
-      <div style={{
-        position: "absolute", left: 60, right: 60, top, height: h,
-        background: "linear-gradient(145deg, rgba(var(--d),.95) 0%, rgba(var(--g),.92) 100%)",
-        borderRadius: 26, overflow: "hidden",
-        border: `2px solid rgba(var(--a),.7)`,
-        boxShadow: "0 24px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.16)",
-        transform: `translateY(${(1 - p) * 50}px) scale(${0.95 + 0.05 * p})`,
-        opacity: Math.min(1, p * 1.5),
-        padding: "22px 30px", boxSizing: "border-box",
-        display: "flex", flexDirection: "column", justifyContent: "space-between",
-      }}>
-        <div style={{
-          fontWeight: 800, fontSize: 22, letterSpacing: 2.2, color: C.orange,
-          borderBottom: "1px solid rgba(255,255,255,0.12)", paddingBottom: 10,
-        }}>{up(o.title || "RINGKASAN FAKTA")}</div>
-        {items.map((it, i) => {
-          const st = Math.round((it._t || i * 0.45) * fps);
-          const q = Math.min(1, spring({frame: f - st, fps, config: {damping: 12, stiffness: 200, mass: 0.6}}));
-          const txt = up(it.text);
-          return (
-            <div key={i} style={{
-              display: "flex", alignItems: "center", gap: 18,
-              opacity: f >= st ? Math.min(1, q * 2) : 0,
-              transform: `translateX(${(1 - q) * 50}px)`,
-            }}>
-              <div style={{
-                minWidth: 38, height: 38, borderRadius: 12,
-                background: C.orange, color: C.black,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontWeight: 800, fontSize: 22, transform: `scale(${q})`,
-                boxShadow: "0 4px 14px rgba(var(--a),.5)",
-              }}>{i + 1}</div>
-              <div style={{
-                fontWeight: 800, fontSize: fitSize(txt, 38, 760), color: C.cream, lineHeight: 1.2,
-              }}>{txt}</div>
+    <>
+      <Dim dur={dur} />
+      <Scene dur={dur} moving={false}>
+        <Glass o={o} x={60} y={top} w={960} h={h} style={{transform: `translateY(${(1 - p) * 60}px)`, opacity: Math.min(1, p * 1.5)}}>
+          <div style={{position: "absolute", left: 30, top: 26, bottom: 26, right: 34}}>
+            <div style={{
+              position: "absolute", left: 0, top: 2, height: 36, width: 6, borderRadius: 3,
+              background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.3))`,
+              boxShadow: "0 0 14px rgba(var(--a),.6)",
+            }} />
+            <div style={{paddingLeft: 22, paddingBottom: 12, borderBottom: "1px solid rgba(255,255,255,0.14)"}}>
+              <Reveal delay={2}>
+                <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 28, letterSpacing: 4, color: C.orange, lineHeight: 1.2}}>
+                  {up(o.title || "RINGKASAN FAKTA")}
+                </div>
+              </Reveal>
             </div>
-          );
-        })}
-        <Shine start={10} alpha={0.28} />
-      </div>
-    </Scene>
+            <div style={{display: "flex", flexDirection: "column", justifyContent: "space-evenly", position: "absolute", left: 0, right: 0, top: 62, bottom: 0}}>
+              {items.map((it, i) => {
+                const st = Math.round((it._t || i * 0.45) * fps);
+                const q = Math.min(1, Math.max(0, spring({frame: f - st, fps, config: SPR})));
+                const txt = up(it.text);
+                return (
+                  <div key={i} style={{display: "flex", alignItems: "center", gap: 20}}>
+                    <div style={{
+                      minWidth: 44, height: 44, borderRadius: 12, background: C.orange, color: C.black,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontFamily: F_DISPLAY, fontWeight: 800, fontSize: 24,
+                      transform: `scale(${q})`, boxShadow: "0 4px 14px rgba(var(--a),.5)",
+                    }}>{i + 1}</div>
+                    <Reveal delay={st} style={{flex: 1}}>
+                      <div style={{fontWeight: 800, fontSize: fitSize(txt, 40, 740), color: C.cream, lineHeight: 1.2}}>{txt}</div>
+                    </Reveal>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Glass>
+      </Scene>
+    </>
   );
 };
+
+/* ---------- Solid: layar penuh bertekstur arsip ---------- */
 
 const Solid: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
   const bg = interpolate(f, [0, 6], [0, 1], clamp);
   const gx = (f * 0.6) % 120;
   const gy = (f * 0.4) % 120;
@@ -263,51 +353,47 @@ const Solid: React.FC<any> = ({o, dur}) => {
       <AbsoluteFill style={{background: `radial-gradient(circle at 50% 42%, ${C.mid} 0%, ${C.dark} 85%)`, opacity: bg}}>
         <div style={{
           position: "absolute", left: -120, top: -120, right: -120, bottom: -120,
-          backgroundImage: "linear-gradient(rgba(var(--c),.08) 2px, transparent 2px), linear-gradient(90deg, rgba(var(--c),.08) 2px, transparent 2px)",
+          backgroundImage: "linear-gradient(rgba(var(--c),.07) 2px, transparent 2px), linear-gradient(90deg, rgba(var(--c),.07) 2px, transparent 2px)",
           backgroundSize: "120px 120px", transform: `translate(${gx}px, ${gy}px)`,
         }} />
         <AbsoluteFill style={{background: "radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0) 25%, rgba(0,0,0,.78) 100%)"}} />
-        {Array.from({length: 28}).map((_, i) => {
+        {Array.from({length: 24}).map((_, i) => {
           const x = random("x" + i) * 1080;
           const y0 = random("y" + i) * 1920;
           const sp2 = 0.5 + random("s" + i) * 1.4;
           const y = (((y0 - f * sp2 * 3.5) % 1920) + 1920) % 1920;
-          const r = 2 + random("r" + i) * 5;
+          const r = 2 + random("r" + i) * 4;
           return <div key={i} style={{
             position: "absolute", left: x, top: y, width: r * 2, height: r * 2, borderRadius: r,
-            background: C.orange, opacity: 0.25 + random("o" + i) * 0.45,
-            boxShadow: `0 0 10px ${C.orange}`,
+            background: C.orange, opacity: 0.2 + random("o" + i) * 0.4,
           }} />;
         })}
         <div style={{
-          position: "absolute", left: 70, right: 70, top: 420, height: 540,
-          borderRadius: 34, background: "rgba(0,0,0,0.38)",
-          border: `2px solid rgba(var(--a),.55)`,
+          position: "absolute", left: 70, right: 70, top: 420, height: 540, borderRadius: 30,
+          background: "rgba(0,0,0,0.38)", border: "1px solid rgba(255,255,255,0.22)",
           boxShadow: "0 30px 80px rgba(0,0,0,0.5)",
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
           padding: "30px 36px", boxSizing: "border-box",
         }}>
           {lines.map((l, i) => {
-            const orange = l.startsWith("*");
+            const accent = l.startsWith("*");
             const t = l.replace(/^\*/, "");
-            const s = Math.min(1, spring({frame: f - 6 - i * 5, fps, config: {damping: 14, stiffness: 160}}));
             return (
-              <div key={i} style={{overflow: "hidden", padding: "6px 0", textAlign: "center"}}>
+              <Reveal key={i} delay={6 + i * 5} style={{textAlign: "center"}}>
                 <div style={{
-                  fontWeight: 800, fontSize: fitSize(t, 74, 820), color: orange ? C.orange : C.cream,
-                  lineHeight: 1.25, transform: `translateY(${(1 - s) * 100}%)`, opacity: s,
-                  textShadow: orange ? "0 0 28px rgba(var(--a),.65)" : "0 4px 16px rgba(0,0,0,0.6)",
+                  fontFamily: accent ? F_SERIF : F_DISPLAY, fontStyle: accent ? "italic" : "normal",
+                  fontWeight: accent ? 700 : 800, fontSize: fitSize(t, accent ? 80 : 74, 820),
+                  color: accent ? C.orange : C.cream, lineHeight: 1.25,
                 }}>{t}</div>
-              </div>
+              </Reveal>
             );
           })}
           <div style={{
-            marginTop: 22, height: 10, borderRadius: 5,
+            marginTop: 22, height: 6, borderRadius: 3,
             background: `linear-gradient(90deg, ${C.orange}, ${C.cream})`,
-            width: Math.min(720, maxLen * 48) * uw, boxShadow: "0 0 22px rgba(var(--a),.8)",
+            width: Math.min(720, maxLen * 48) * uw,
           }} />
         </div>
-        <Shine start={8} len={22} alpha={0.25} />
       </AbsoluteFill>
     </Scene>
   );
@@ -375,30 +461,20 @@ const IconArt: React.FC<any> = ({name, draw, f}) => {
   </g>);
 };
 
+
 const Icon: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const pIn = Math.min(1, spring({frame: f, fps, config: {damping: 14, stiffness: 150}}));
-  const pop = spring({frame: f - 3, fps, config: {damping: 8, stiffness: 175, mass: 0.7}});
+  const pIn = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
+  const pop = spring({frame: f - 3, fps, config: {damping: 10, stiffness: 175, mass: 0.7}});
   const draw = interpolate(f, [6, 20], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
   const ring = interpolate(f, [6, 24], [0, 1], clamp);
   const floatY = Math.sin(f * 0.16) * 8;
   const label = up(o.label);
-  const lbl = Math.min(1, spring({frame: f - 10, fps, config: {damping: 15, stiffness: 150}}));
   return (
     <Scene dur={dur} moving={false}>
-      <AbsoluteFill style={{background: "rgba(var(--g),.52)", opacity: pIn}} />
-      <div style={{
-        position: "absolute", left: 90, right: 90, top: 410, height: 590, borderRadius: 34,
-        background: "linear-gradient(155deg, rgba(var(--d),.95) 0%, rgba(var(--g),.92) 100%)",
-        border: `3px solid rgba(var(--a),.8)`,
-        boxShadow: "0 30px 70px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.2)",
-        opacity: pIn, transform: `scale(${0.88 + 0.12 * pIn})`,
-        transformOrigin: "50% 50%", overflow: "hidden",
-      }}>
-        <Shine start={8} len={20} alpha={0.3} />
-      </div>
+      <Glass o={o} x={90} y={410} w={900} h={590} radius={34} style={{opacity: pIn, transform: `scale(${0.9 + 0.1 * pIn})`}} />
       <svg width={1080} height={1920} style={{position: "absolute", left: 0, top: 0}}>
         <g transform={`translate(540 ${635 + floatY}) scale(${Math.max(0, pop)})`}>
           <IconArt name={o.icon} draw={draw} f={f} />
@@ -406,108 +482,59 @@ const Icon: React.FC<any> = ({o, dur}) => {
         <circle cx={540} cy={635} r={95 + ring * 185} fill="none" stroke={C.orange}
           strokeWidth={6 * (1 - ring) + 1} opacity={(1 - ring) * (f >= 6 ? 1 : 0)} />
       </svg>
-      <div style={{
-        position: "absolute", left: 110, right: 110, top: 840, textAlign: "center", overflow: "hidden", height: 90,
-      }}>
-        <div style={{
-          fontWeight: 800, fontSize: fitSize(label, 42, 820), color: C.cream,
-          transform: `translateY(${(1 - lbl) * 70}px)`,
-        }}>{label}</div>
+      <div style={{position: "absolute", left: 110, right: 110, top: 836, textAlign: "center"}}>
+        <Reveal delay={10}>
+          <div style={{fontWeight: 800, fontSize: fitSize(label, 42, 820), color: C.cream}}>{label}</div>
+        </Reveal>
       </div>
     </Scene>
   );
 };
+
+/* ---------- QMark: tanda tanya serif editorial ---------- */
 
 const QMark: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const s = spring({frame: f, fps, config: {damping: 7, stiffness: 170, mass: 0.7}});
-  const wob = Math.sin(f / 5) * 4 * Math.max(0, 1 - f / 30);
-  const pill = Math.min(1, spring({frame: f - 10, fps, config: {damping: 14, stiffness: 160}}));
+  const s = spring({frame: f, fps, config: {damping: 9, stiffness: 170, mass: 0.7}});
+  const wob = Math.sin(f / 5) * 3 * Math.max(0, 1 - f / 30);
+  const pill = Math.min(1, Math.max(0, spring({frame: f - 8, fps, config: SPR})));
   const label = up(o.label);
-  const glow = 30 + Math.sin(f / 4) * 14;
+  const glow = 26 + Math.sin(f / 4) * 12;
   return (
     <Scene dur={dur}>
       <div style={{
-        position: "absolute", left: 0, right: 0, top: 360, textAlign: "center", fontWeight: 800,
-        fontSize: 330, color: C.orange, lineHeight: 1,
+        position: "absolute", left: 0, right: 0, top: 330, textAlign: "center",
+        fontFamily: F_SERIF, fontStyle: "italic", fontWeight: 700,
+        fontSize: 380, color: C.orange, lineHeight: 1,
         transform: `scale(${Math.max(0, s)}) rotate(${wob}deg)`,
         WebkitTextStroke: `8px ${C.black}`, paintOrder: "stroke fill",
-        textShadow: `0 0 ${glow}px rgba(var(--a),.75)`,
+        textShadow: `0 0 ${glow}px rgba(var(--a),.7)`,
       } as any}>?</div>
-      <div style={{
-        position: "absolute", left: 60, right: 60, top: 810, display: "flex", justifyContent: "center",
-        transform: `translateY(${(1 - pill) * 50}px)`, opacity: pill,
-      }}>
-        <div style={{
-          fontWeight: 800, fontSize: fitSize(label, 42, 820), color: C.cream, padding: "16px 42px",
-          borderRadius: 44, background: "rgba(var(--d),.94)", border: `3px solid ${C.orange}`,
-          textAlign: "center", boxShadow: "0 16px 40px rgba(0,0,0,0.5)",
-        }}>{label}</div>
-      </div>
+      <Glass o={o} x={90} y={800} w={900} radius={44} style={{opacity: pill, transform: `translateY(${(1 - pill) * 40}px)`}}>
+        <div style={{padding: "14px 40px 18px", textAlign: "center"}}>
+          <Reveal delay={8}>
+            <div style={{fontWeight: 800, fontSize: fitSize(label, 42, 800), color: C.cream, lineHeight: 1.25}}>{label}</div>
+          </Reveal>
+        </div>
+      </Glass>
     </Scene>
   );
 };
 
-const CardFrame: React.FC<any> = ({dur, o, children}) => {
-  const C = useC();
-  const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
-  const s = spring({frame: f, fps, config: {damping: 13, stiffness: 120, mass: 0.9}});
-  const sc = Math.min(1, s);
-  const lab = Math.min(1, spring({frame: f - 12, fps, config: {damping: 15, stiffness: 150}}));
-  const label = up(o.label);
-  return (
-    <Scene dur={dur} moving={false}>
-      <div style={{position: "absolute", left: 100, top: 330, width: 880, height: 730, perspective: 1400}}>
-        <div style={{
-          position: "relative", width: "100%", height: "100%", borderRadius: 28, overflow: "hidden",
-          background: "rgba(var(--g),.95)", border: `4px solid ${C.orange}`, boxSizing: "border-box",
-          transform: `rotateY(${interpolate(s, [0, 1], [38, 0])}deg) translateY(${(1 - sc) * 80}px) scale(${0.9 + 0.1 * sc})`,
-          opacity: Math.min(1, s * 2), boxShadow: "0 30px 80px rgba(0,0,0,.45)",
-        }}>
-          <div style={{position: "absolute", left: 26, top: 26, width: 820, height: 480, borderRadius: 18, overflow: "hidden", background: C.dark}}>
-            {children}
-          </div>
-          <div style={{position: "absolute", left: 20, right: 20, top: 530, textAlign: "center", overflow: "hidden", height: 70}}>
-            <div style={{
-              fontWeight: 800, fontSize: fitSize(label, 42, 820), color: C.cream,
-              transform: `translateY(${(1 - lab) * 70}px)`,
-            }}>{label}</div>
-          </div>
-          {o.sub ? (
-            <div style={{position: "absolute", left: 20, right: 20, top: 610, textAlign: "center", overflow: "hidden", height: 64}}>
-              <div style={{
-                fontWeight: 800, fontSize: fitSize(up(o.sub), 38, 820), color: C.orange,
-                transform: `translateY(${(1 - Math.min(1, spring({frame: f - 18, fps, config: {damping: 15, stiffness: 150}}))) * 70}px)`,
-              }}>{up(o.sub)}</div>
-            </div>
-          ) : null}
-          <Shine start={14} len={22} alpha={0.4} />
-        </div>
-      </div>
-    </Scene>
-  );
-};
+/* ---------- Peta: wilayah Indonesia, camera fly-to, radar, leader line ---------- */
+
+const MAP_W = 860;
+const MAP_H = 560;
 
 let GEO_PROMISE: Promise<any> | null = null;
 const loadGeo = (): Promise<any> => {
   if (GEO_PROMISE) return GEO_PROMISE;
-  const ld = async (n: string) => {
-    try {
-      const r = await fetch(staticFile(n));
-      if (!r.ok) return null;
-      return await r.json();
-    } catch (e) { return null; }
-  };
-  GEO_PROMISE = Promise.all([ld("world.json"), ld("indonesia-prov.geojson")]).then(([w, p]: any) => {
-    let countries: any[] = [];
-    try {
-      if (w && w.objects && w.objects.countries) countries = (topoFeature(w, w.objects.countries) as any).features;
-    } catch (e) { countries = []; }
-    return {countries, prov: p && p.features ? p.features : []};
-  }).catch(() => ({countries: [], prov: []}));
+  GEO_PROMISE = fetch(staticFile("indonesia-prov.geojson"))
+    .then((r) => (r.ok ? r.json() : null))
+    .then((p: any) => ({prov: p && Array.isArray(p.features) ? p.features : []}))
+    .catch(() => ({prov: []}));
   return GEO_PROMISE;
 };
 
@@ -525,140 +552,217 @@ const useGeo = () => {
 const MapView: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
+  const {fps} = useVideoConfig();
   const geo = useGeo();
-  const proj: any = useMemo(() => geoMercator().center([0, 15]).scale(118).translate([410, 240]), []);
-  const pin: [number, number] = o.pin || [106.25, -6.62];
-  const from: any = o.from || null;
-  const pp = proj(pin);
-  const fp = from ? proj([from[0], from[1]]) : null;
-  const S = Math.max(4, o.zoom || 60);
-  const w = interpolate(f, [6, Math.round(dur * 0.72)], [0, 1], {...clamp, easing: Easing.inOut(Easing.cubic)});
-  const sc = Math.pow(S, w);
-  const tx = w * (410 - pp[0] * sc);
-  const ty = w * (240 - pp[1] * sc);
-  const shapes = useMemo(() => {
-    if (!geo) return {c: [], p: []};
-    const gp = geoPath(proj);
-    const hasProv = geo.prov.length > 0;
-    const c = geo.countries.map((ft: any) => {
-      let hit = false;
-      try { hit = geoContains(ft, pin); } catch (e) { hit = false; }
-      return {d: gp(ft) || "", hit: hit && !hasProv};
-    });
-    const p = geo.prov.map((ft: any) => {
-      let hit = false;
-      try { hit = geoContains(ft, pin); } catch (e) { hit = false; }
-      return {d: gp(ft) || "", hit};
-    });
-    return {c, p};
+  const pin: [number, number] = Array.isArray(o.pin) && o.pin.length === 2 ? [Number(o.pin[0]), Number(o.pin[1])] : [106.25, -6.62];
+  const pinKey = pin.join(",");
+
+  const base: any = useMemo(() => {
+    const p: any = geoMercator();
+    const feats = geo && geo.prov ? geo.prov : [];
+    if (feats.length) p.fitExtent([[28, 28], [MAP_W - 28, MAP_H - 28]], {type: "FeatureCollection", features: feats} as any);
+    else p.center([118, -2]).scale(980).translate([MAP_W / 2, MAP_H / 2]);
+    return p;
   }, [geo]);
-  const grat: any[] = useMemo(() => {
-    const g: any[] = [];
-    for (let lon = -180; lon <= 180; lon += 15) g.push({a: proj([lon, -75]), b: proj([lon, 80])});
-    for (let lat = -60; lat <= 80; lat += 15) g.push({a: proj([-180, lat]), b: proj([180, lat])});
-    return g;
-  }, []);
-  const sx = pp[0] * sc + tx;
-  const sy = pp[1] * sc + ty;
-  const r = interpolate(w, [0.35, 0.95], [0, 1], clamp);
-  let routeD = "", dot: any = null;
-  if (fp) {
-    const cx = (fp[0] + pp[0]) / 2, cy = (fp[1] + pp[1]) / 2 - 25 / S;
-    routeD = `M ${fp[0]} ${fp[1]} Q ${cx} ${cy} ${pp[0]} ${pp[1]}`;
-    const t = r;
-    dot = [
-      (1 - t) * (1 - t) * fp[0] + 2 * (1 - t) * t * cx + t * t * pp[0],
-      (1 - t) * (1 - t) * fp[1] + 2 * (1 - t) * t * cy + t * t * pp[1],
-    ];
+
+  const built = useMemo(() => {
+    const gp: any = geoPath(base);
+    if (gp.digits) gp.digits(1);
+    const feats = geo && geo.prov ? geo.prov : [];
+    const shapes = feats.map((ft: any) => {
+      let hit = false;
+      try { hit = geoContains(ft, pin); } catch (e) { hit = false; }
+      let bb: any = [[0, 0], [1, 1]];
+      try { bb = gp.bounds(ft); } catch (e) { bb = [[0, 0], [1, 1]]; }
+      return {d: gp(ft) || "", hit, bb};
+    });
+    let grat = "";
+    try { grat = gp(geoGraticule().step([5, 5])()) || ""; } catch (e) { grat = ""; }
+    return {shapes, grat};
+  }, [geo, base, pinKey]);
+
+  const P: any = base(pin) || [MAP_W / 2, MAP_H / 2];
+  const C0: any = [MAP_W / 2, MAP_H / 2];
+  const hitS: any = built.shapes.find((s: any) => s.hit);
+  let k1 = o.zoom ? Number(o.zoom) / 5 : 6;
+  if (hitS) {
+    const bw = Math.max(1, hitS.bb[1][0] - hitS.bb[0][0]);
+    const bh = Math.max(1, hitS.bb[1][1] - hitS.bb[0][1]);
+    k1 = Math.min((MAP_W * 0.62) / bw, (MAP_H * 0.62) / bh);
   }
-  const pinOp = interpolate(w, [0.75, 1], [0, 1], clamp);
-  const provOp = interpolate(w, [0.35, 0.75], [0, 1], clamp);
-  const hitPulse = 0.35 + 0.15 * Math.sin(f / 5);
-  const coord = `${Math.abs(pin[1]).toFixed(2)}°${pin[1] < 0 ? "S" : "N"} ${Math.abs(pin[0]).toFixed(2)}°${pin[0] < 0 ? "W" : "E"}`;
+  k1 = Math.max(2, Math.min(16, k1));
+
+  const flyEnd = Math.max(24, Math.round(dur * 0.6));
+  const w = interpolate(f, [6, flyEnd], [0, 1], {...clamp, easing: Easing.inOut(Easing.cubic)});
+  const wc = 1 - Math.pow(1 - w, 2);
+  const k = Math.exp(w * Math.log(k1) - 0.22 * Math.sin(Math.PI * w));
+  const cx = C0[0] + (P[0] - C0[0]) * wc;
+  const cy = C0[1] + (P[1] - C0[1]) * wc;
+  const tx = MAP_W / 2 + (MAP_W * 0.42 - MAP_W / 2) * w;
+  const ty = MAP_H / 2 + (MAP_H * 0.60 - MAP_H / 2) * w;
+  const sx = tx + (P[0] - cx) * k;
+  const sy = ty + (P[1] - cy) * k;
+
+  const arrive = flyEnd;
+  const pinOp = interpolate(f, [arrive - 10, arrive], [0, 1], clamp);
+  const hitPulse = 0.22 + 0.08 * Math.sin(f / 5);
+
+  // Callout responsif: arah dipilih agar kotak selalu di dalam bingkai peta.
+  const labelTxt = up(o.label);
+  const labelLines = wrapLines([labelTxt], 13).slice(0, 2).map((l) => l.replace(/^\*/, ""));
+  const subLines = o.sub ? wrapLines([titleCase(o.sub)], 24).slice(0, 2).map((l) => l.replace(/^\*/, "")) : [];
+  const boxW = 330;
+  const boxH = 26 + labelLines.length * 40 + (subLines.length ? 10 + subLines.length * 33 : 0) + 22;
+  const L = 64, M = 16;
+  const dirs: any[] = [[1, -1], [-1, -1], [1, 1], [-1, 1]];
+  let pick: any = null;
+  for (const [dx, dy] of dirs) {
+    const ex = sx + dx * L, ey = sy + dy * L;
+    const bx = dx > 0 ? ex : ex - boxW;
+    const by = ey - boxH / 2;
+    if (bx >= M && bx + boxW <= MAP_W - M && by >= M && by + boxH <= MAP_H - M) { pick = {dx, dy, ex, ey, bx, by}; break; }
+  }
+  if (!pick) {
+    const dx = sx < MAP_W / 2 ? 1 : -1, dy = sy < MAP_H / 2 ? 1 : -1;
+    const ex = sx + dx * L, ey = sy + dy * L;
+    const bx0 = dx > 0 ? ex : ex - boxW;
+    pick = {dx, dy, ex, ey,
+      bx: Math.max(M, Math.min(MAP_W - M - boxW, bx0)),
+      by: Math.max(M, Math.min(MAP_H - M - boxH, ey - boxH / 2))};
+  }
+  const lp = interpolate(f, [arrive, arrive + 10], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
+  const bp = Math.min(1, Math.max(0, spring({frame: f - arrive - 6, fps, config: SPR})));
+  const coord = `${Math.abs(pin[1]).toFixed(2)}°${pin[1] < 0 ? "S" : "N"}  ${Math.abs(pin[0]).toFixed(2)}°${pin[0] < 0 ? "W" : "E"}`;
+  const cardIn = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
+  const lineLen = Math.sqrt(2) * L;
+
   return (
-    <CardFrame o={o} dur={dur}>
-      <svg width={820} height={480} viewBox="0 0 820 480" style={{position: "absolute", left: 0, top: 0}}>
-        <rect width={820} height={480} fill={C.dark} />
-        <g transform={`translate(${tx} ${ty}) scale(${sc})`}>
-          {grat.map((g, i) => (
-            <line key={i} x1={g.a[0]} y1={g.a[1]} x2={g.b[0]} y2={g.b[1]}
-              stroke={C.cream} strokeOpacity={0.07} strokeWidth={1} vectorEffect="non-scaling-stroke" />
-          ))}
-          {shapes.c.map((p: any, i: number) => (
-            <path key={"c" + i} d={p.d} fill={p.hit ? C.orange : C.mid} fillOpacity={p.hit ? hitPulse + 0.4 : 1}
-              stroke={C.cream} strokeOpacity={0.4} strokeWidth={0.8} vectorEffect="non-scaling-stroke" />
-          ))}
-          <g opacity={provOp}>
-            {shapes.p.map((p: any, i: number) => (
-              <path key={"p" + i} d={p.d} fill={p.hit ? C.orange : C.mid} fillOpacity={p.hit ? hitPulse + 0.4 : 1}
-                stroke={C.cream} strokeOpacity={0.45} strokeWidth={0.8} vectorEffect="non-scaling-stroke" />
-            ))}
-          </g>
-          {fp ? (
-            <g>
-              <path d={routeD} fill="none" stroke={C.cream} strokeOpacity={0.25} strokeWidth={2}
-                strokeDasharray="4 6" vectorEffect="non-scaling-stroke" />
-              <path d={routeD} pathLength={1} fill="none" stroke={C.orange} strokeWidth={4}
-                strokeLinecap="round" strokeDasharray={1} strokeDashoffset={1 - r}
-                vectorEffect="non-scaling-stroke" />
-              {dot ? <circle cx={dot[0]} cy={dot[1]} r={5 / sc} fill={C.cream} /> : null}
-            </g>
-          ) : null}
-        </g>
-        <g opacity={pinOp}>
-          {[0, 1, 2].map((i) => {
-            const k = ((f + i * 10) % 30) / 30;
-            return <circle key={i} cx={sx} cy={sy} r={8 + k * 45} fill="none" stroke={C.orange}
-              strokeWidth={3} opacity={1 - k} />;
-          })}
-          <circle cx={sx} cy={sy} r={10} fill={C.orange} stroke={C.cream} strokeWidth={3} />
-        </g>
-        <defs>
-          <radialGradient id="vg" cx="50%" cy="50%" r="75%">
-            <stop offset="55%" stopColor="#000" stopOpacity={0} />
-            <stop offset="100%" stopColor="#000" stopOpacity={0.6} />
-          </radialGradient>
-        </defs>
-        <rect width={820} height={480} fill="url(#vg)" />
-        <g stroke={C.orange} strokeWidth={4} fill="none" opacity={0.9}>
-          <path d="M 14 44 L 14 14 L 44 14" /><path d="M 776 14 L 806 14 L 806 44" />
-          <path d="M 14 436 L 14 466 L 44 466" /><path d="M 806 436 L 806 466 L 776 466" />
-        </g>
-        <text x={28} y={452} fill={C.cream} fontSize={18} fontWeight={800} fontFamily={FONT}
-          opacity={pinOp}>{coord}</text>
-      </svg>
-    </CardFrame>
+    <>
+      <Dim dur={dur} />
+      <Scene dur={dur} moving={false}>
+        <Glass o={o} x={70} y={330} w={940} h={690} radius={30} style={{opacity: cardIn, transform: `translateY(${(1 - cardIn) * 50}px)`}}>
+          <div style={{position: "absolute", left: 40, right: 40, top: 22, height: 48, display: "flex", alignItems: "center", justifyContent: "space-between"}}>
+            <div style={{display: "flex", alignItems: "center", gap: 12}}>
+              <div style={{width: 12, height: 12, borderRadius: 6, background: C.orange, boxShadow: `0 0 12px ${C.orange}`}} />
+              <Reveal delay={2}><div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 28, letterSpacing: 5, color: C.orange}}>LOKASI</div></Reveal>
+            </div>
+            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 26, letterSpacing: 2, color: C.cream, opacity: pinOp}}>{coord}</div>
+          </div>
+          <div style={{position: "absolute", left: 40, top: 84, width: MAP_W, height: MAP_H, borderRadius: 18, overflow: "hidden", background: C.dark, border: "1px solid rgba(255,255,255,0.16)"}}>
+            <svg width={MAP_W} height={MAP_H} viewBox={`0 0 ${MAP_W} ${MAP_H}`} style={{position: "absolute", left: 0, top: 0}}>
+              <defs>
+                <radialGradient id="sea" cx="50%" cy="50%" r="80%">
+                  <stop offset="0%" stopColor={C.mid} stopOpacity={0.35} />
+                  <stop offset="100%" stopColor={C.dark} stopOpacity={1} />
+                </radialGradient>
+                <radialGradient id="mvg" cx="50%" cy="50%" r="75%">
+                  <stop offset="55%" stopColor="#000" stopOpacity={0} />
+                  <stop offset="100%" stopColor="#000" stopOpacity={0.55} />
+                </radialGradient>
+              </defs>
+              <rect width={MAP_W} height={MAP_H} fill="url(#sea)" />
+              <g transform={`translate(${tx} ${ty}) scale(${k}) translate(${-cx} ${-cy})`}>
+                {built.grat ? (
+                  <path d={built.grat} fill="none" stroke={C.cream} strokeOpacity={0.09} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                ) : null}
+                {built.shapes.map((s: any, i: number) => (
+                  <path key={"h" + i} d={s.d} fill="none" stroke={C.cream} strokeOpacity={0.1} strokeWidth={7}
+                    strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+                ))}
+                {built.shapes.map((s: any, i: number) => (
+                  <path key={"p" + i} d={s.d}
+                    fill={s.hit ? C.orange : C.mid} fillOpacity={s.hit ? hitPulse + 0.12 : 0.92}
+                    stroke={s.hit ? C.orange : C.cream} strokeOpacity={s.hit ? 1 : 0.42}
+                    strokeWidth={s.hit ? 2.4 : 0.9} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+                ))}
+              </g>
+              <rect width={MAP_W} height={MAP_H} fill="url(#mvg)" />
+              <g opacity={pinOp}>
+                {[0, 1, 2].map((i) => {
+                  const q = ((f + i * 12) % 36) / 36;
+                  return <circle key={i} cx={sx} cy={sy} r={10 + q * 62} fill="none" stroke={C.orange} strokeWidth={3} opacity={(1 - q) * 0.95} />;
+                })}
+                <circle cx={sx} cy={sy} r={9} fill={C.orange} stroke={C.cream} strokeWidth={3} />
+              </g>
+              <g opacity={pinOp > 0 ? 1 : 0}>
+                <line x1={sx + pick.dx * 12} y1={sy + pick.dy * 12} x2={pick.ex} y2={pick.ey}
+                  stroke={C.cream} strokeWidth={3} strokeLinecap="round"
+                  strokeDasharray={lineLen} strokeDashoffset={lineLen * (1 - lp)} />
+                <circle cx={pick.ex} cy={pick.ey} r={6 * lp} fill={C.orange} stroke={C.cream} strokeWidth={2} />
+              </g>
+              <g stroke={C.orange} strokeWidth={4} fill="none" opacity={0.9}>
+                <path d="M 14 44 L 14 14 L 44 14" /><path d={`M ${MAP_W - 44} 14 L ${MAP_W - 14} 14 L ${MAP_W - 14} 44`} />
+                <path d={`M 14 ${MAP_H - 44} L 14 ${MAP_H - 14} L 44 ${MAP_H - 14}`} />
+                <path d={`M ${MAP_W - 14} ${MAP_H - 44} L ${MAP_W - 14} ${MAP_H - 14} L ${MAP_W - 44} ${MAP_H - 14}`} />
+              </g>
+            </svg>
+            <div style={{
+              position: "absolute", left: pick.bx, top: pick.by, width: boxW, height: boxH, boxSizing: "border-box",
+              borderRadius: 14, background: "rgba(8,12,10,0.80)", border: "1px solid rgba(255,255,255,0.24)",
+              borderLeft: `6px solid ${C.orange}`, boxShadow: "0 14px 34px rgba(0,0,0,0.5)",
+              padding: "13px 18px 11px 18px", opacity: bp > 0 ? 1 : 0,
+              clipPath: pick.dx > 0 ? `inset(0 ${(1 - bp) * 100}% 0 0)` : `inset(0 0 0 ${(1 - bp) * 100}%)`,
+            } as any}>
+              {labelLines.map((l, i) => (
+                <div key={i} style={{fontFamily: F_DISPLAY, fontWeight: 800, fontSize: 32, lineHeight: "40px", color: C.cream, whiteSpace: "nowrap"}}>
+                  {i === 0 && labelLines.length === 1 ? <MarkedText text={l} delay={arrive + 10} color={C.orange} ink={C.black} /> : l}
+                </div>
+              ))}
+              {subLines.length ? (
+                <div style={{marginTop: 10}}>
+                  {subLines.map((l, i) => (
+                    <div key={i} style={{fontFamily: F_SERIF, fontStyle: "italic", fontWeight: 700, fontSize: 26, lineHeight: "33px", color: C.orange, whiteSpace: "nowrap"}}>{l}</div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </Glass>
+      </Scene>
+    </>
   );
 };
+
+/* ---------- Subtitle kinetik di safe-zone tengah-bawah ---------- */
 
 const Caps: React.FC<any> = ({cue, dur, fps}) => {
   const C = useC();
   const f = useCurrentFrame();
   const out = interpolate(f, [dur - 4, dur], [1, 0], clamp);
+  const inn = interpolate(f, [0, 4], [0, 1], clamp);
+  const longest = Math.max(...cue.lines.map((ln: any[]) => ln.map((x: any) => x.w).join(" ").length), 1);
+  const fs = Math.max(34, Math.min(56, 840 / (longest * 0.68)));
   return (
-    <AbsoluteFill style={{fontFamily: FONT, opacity: out}}>
-      <div style={{position: "absolute", left: 40, right: 40, bottom: 440, display: "flex", flexDirection: "column", alignItems: "center"}}>
-        {cue.lines.map((ln: any[], li: number) => (
-          <div key={li} style={{display: "flex", justifyContent: "center", gap: 24, whiteSpace: "nowrap", marginTop: li ? 16 : 0}}>
-            {ln.map((wd: any, wi: number) => {
-              const st = Math.round((wd.t0 - cue.s) * fps);
-              const en = Math.round((wd.t1 - cue.s) * fps);
-              const sp = spring({frame: f - st, fps, config: {damping: 11, stiffness: 230, mass: 0.5}});
-              const live = f >= st && f < en;
-              const sc = interpolate(Math.min(sp, 1.15), [0, 1], [0.5, 1]) * (wd.kw ? 1.05 : 1) * (live ? 1.03 : 1);
-              const rise = (1 - Math.min(sp, 1)) * 24;
-              return (
-                <div key={wi} style={{
-                  fontWeight: 800, fontSize: 54, color: wd.kw ? C.orange : "#FFFFFF",
-                  opacity: f >= st ? Math.min(1, sp * 2.5) : 0,
-                  transform: `translateY(${rise}px) scale(${sc})`,
-                  WebkitTextStroke: `6px ${C.black}`, paintOrder: "stroke fill",
-                  textShadow: wd.kw ? "0 0 28px rgba(var(--a),.7)" : "none",
-                } as any}>{wd.w}</div>
-              );
-            })}
-          </div>
-        ))}
+    <AbsoluteFill style={{fontFamily: F_DISPLAY, opacity: out * inn}}>
+      <div style={{position: "absolute", left: "8%", width: "84%", bottom: "24%", display: "flex", justifyContent: "center"}}>
+        <div style={{
+          maxWidth: "100%", boxSizing: "border-box", padding: "14px 30px 18px", borderRadius: 26,
+          background: "rgba(8,10,9,0.64)", border: "1px solid rgba(255,255,255,0.14)",
+          boxShadow: "0 12px 34px rgba(0,0,0,0.45)",
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 4, textAlign: "center",
+        }}>
+          {cue.lines.map((ln: any[], li: number) => (
+            <div key={li} style={{display: "flex", justifyContent: "center", gap: fs * 0.3, whiteSpace: "nowrap"}}>
+              {ln.map((wd: any, wi: number) => {
+                const st = Math.round((wd.t0 - cue.s) * fps);
+                const en = Math.round((wd.t1 - cue.s) * fps);
+                const sp = spring({frame: f - st, fps, config: {damping: 12, stiffness: 230, mass: 0.5}});
+                const live = f >= st && f < en;
+                const sc = interpolate(Math.min(sp, 1.15), [0, 1], [0.6, 1]) * (wd.kw ? 1.05 : 1) * (live ? 1.03 : 1);
+                const rise = (1 - Math.min(sp, 1)) * 18;
+                return (
+                  <div key={wi} style={{
+                    fontWeight: 800, fontSize: fs, lineHeight: 1.25,
+                    color: wd.kw ? C.orange : "#FFFFFF",
+                    opacity: f >= st ? Math.min(1, sp * 2.5) : 0,
+                    transform: `translateY(${rise}px) scale(${sc})`,
+                    textShadow: wd.kw ? "0 0 22px rgba(var(--a),.6)" : "0 2px 8px rgba(0,0,0,0.5)",
+                  } as any}>{wd.w}</div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
       </div>
     </AbsoluteFill>
   );
@@ -669,32 +773,35 @@ const REG: any = {
   icon: Icon, qmark: QMark, map: MapView,
 };
 
-export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], captions = [], theme = null}) => {
+export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], captions = [], theme = null, glassSrc = null}) => {
   const C = useMemo(() => ({...DEFAULT_C, ...(theme && theme.hex ? theme.hex : {})}), [theme]);
   const vars: any = theme && theme.vars ? theme.vars : {};
+  const cfg = useMemo(() => ({glass: glassSrc}), [glassSrc]);
   return (
     <ThemeCtx.Provider value={C}>
-      <AbsoluteFill style={vars}>
-        {overlays.map((o: any, i: number) => {
-          const from = Math.round(o.t0 * fps);
-          const dur = Math.max(6, Math.round((o.t1 - o.t0) * fps));
-          const Comp = REG[o.type] || Lower;
-          return (
-            <Sequence key={i} from={from} durationInFrames={dur}>
-              <Comp o={o} dur={dur} images={images} />
-            </Sequence>
-          );
-        })}
-        {captions.map((c: any, i: number) => {
-          const from = Math.round(c.s * fps);
-          const dur = Math.max(4, Math.round((c.e - c.s) * fps));
-          return (
-            <Sequence key={"c" + i} from={from} durationInFrames={dur}>
-              <Caps cue={c} dur={dur} fps={fps} />
-            </Sequence>
-          );
-        })}
-      </AbsoluteFill>
+      <CfgCtx.Provider value={cfg}>
+        <AbsoluteFill style={vars}>
+          {overlays.map((o: any, i: number) => {
+            const from = Math.round(o.t0 * fps);
+            const dur = Math.max(6, Math.round((o.t1 - o.t0) * fps));
+            const Comp = REG[o.type] || Lower;
+            return (
+              <Sequence key={i} from={from} durationInFrames={dur}>
+                <Comp o={o} dur={dur} images={images} />
+              </Sequence>
+            );
+          })}
+          {captions.map((c: any, i: number) => {
+            const from = Math.round(c.s * fps);
+            const dur = Math.max(4, Math.round((c.e - c.s) * fps));
+            return (
+              <Sequence key={"c" + i} from={from} durationInFrames={dur}>
+                <Caps cue={c} dur={dur} fps={fps} />
+              </Sequence>
+            );
+          })}
+        </AbsoluteFill>
+      </CfgCtx.Provider>
     </ThemeCtx.Provider>
   );
 };
@@ -732,17 +839,10 @@ def download_geo_assets(remo_dir: str = "/tmp/remotion_overlay"):
 
     _dl(
         [
-            "https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json",
-            "https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json",
-        ],
-        f"{remo_dir}/public/world.json",
-        lambda o: "objects" in o and "countries" in o["objects"],
-        "peta dunia",
-    )
-    _dl(
-        [
             f"https://raw.githubusercontent.com/ans-4175/peta-indonesia-geojson/{br}/indonesia-prov.geojson"
             for br in ("master", "main")
+        ] + [
+            "https://cdn.jsdelivr.net/gh/ans-4175/peta-indonesia-geojson@master/indonesia-prov.geojson",
         ],
         f"{remo_dir}/public/indonesia-prov.geojson",
         lambda o: isinstance(o.get("features"), list) and len(o["features"]) > 0,
