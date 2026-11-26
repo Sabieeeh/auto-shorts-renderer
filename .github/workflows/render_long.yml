@@ -118,5 +118,6 @@ jobs:
           INPUT_EDIT_CMD: ${{ github.event.inputs.edit_cmd }}
           INPUT_CHAT_ID: ${{ github.event.inputs.chat_id }}
           VIDEO_MODE: "LONG"
+          AUTO_MODEL: ${{ secrets.AUTO_MODEL }}
         run: |
           python main.py
