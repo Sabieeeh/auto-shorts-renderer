@@ -1,17 +1,34 @@
 import os
 import io
+import ssl
 import json
+import time
+import random
+import socket
+
+import httplib2
 from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
+from google.auth.exceptions import TransportError
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
+MAX_RETRIES = 5
+BACKOFF_BASE = 2.0
+BACKOFF_MAX = 30.0
+INNER_RETRIES = 3
+UPLOAD_CHUNK = 8 * 1024 * 1024
+DOWNLOAD_CHUNK = 10 * 1024 * 1024
 
-def get_drive_service():
-    """Inisialisasi Google Drive API v3 memakai OAuth Refresh Token atau Service Account."""
+_FATAL_OS = (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError)
+
+
+def _build_service():
+    """Bangun objek service Google Drive API v3 baru."""
     sa_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
     if sa_json:
         info = json.loads(sa_json)
@@ -30,13 +47,90 @@ def get_drive_service():
             client_secret=client_secret,
             scopes=SCOPES,
         )
-        creds.refresh(Request())
+        _call_with_retry("refresh token OAuth", None, lambda _s: creds.refresh(Request()))
         return build("drive", "v3", credentials=creds, cache_discovery=False)
 
     raise RuntimeError(
         "Kredensial Google Drive belum disetel! Isi GDRIVE_CLIENT_ID + GDRIVE_CLIENT_SECRET + GDRIVE_REFRESH_TOKEN "
         "atau GDRIVE_SERVICE_ACCOUNT_JSON di GitHub Secrets."
     )
+
+
+class ResilientDrive:
+    """Pembungkus service Drive yang dapat membangun ulang koneksi saat error putus."""
+
+    def __init__(self):
+        self._svc = _build_service()
+
+    def rebuild(self):
+        self._svc = _build_service()
+
+    def __getattr__(self, name):
+        if name == "_svc" or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self._svc, name)
+
+
+def get_drive_service():
+    """Inisialisasi Google Drive API v3 memakai OAuth Refresh Token atau Service Account."""
+    return ResilientDrive()
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, HttpError):
+        status = getattr(exc.resp, "status", 0)
+        if status in (408, 429, 500, 502, 503, 504):
+            return True
+        if status == 403 and "ratelimit" in str(exc).lower():
+            return True
+        return False
+    if isinstance(exc, _FATAL_OS):
+        return False
+    return isinstance(
+        exc,
+        (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            ssl.SSLError,
+            socket.timeout,
+            TimeoutError,
+            OSError,
+            httplib2.HttpLib2Error,
+            TransportError,
+        ),
+    )
+
+
+def _rebuild(service):
+    try:
+        if hasattr(service, "rebuild"):
+            service.rebuild()
+            return service
+        return _build_service()
+    except Exception as e:
+        print(f"[Drive] Gagal membangun ulang service: {type(e).__name__}: {str(e)[:160]}")
+        return service
+
+
+def _call_with_retry(label: str, service, fn, retries: int = MAX_RETRIES):
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn(service)
+        except Exception as e:
+            if not _is_retryable(e):
+                raise
+            last = e
+            print(f"[Drive] {label} gagal (percobaan {attempt}/{retries}): {type(e).__name__}: {str(e)[:160]}")
+            if attempt == retries:
+                break
+            wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX) + random.uniform(0.0, 1.0)
+            print(f"[Drive] Menunggu {wait:.1f} dtk lalu mencoba lagi dengan koneksi baru...")
+            time.sleep(wait)
+            if service is not None:
+                service = _rebuild(service)
+    raise RuntimeError(f"[Drive] {label} gagal setelah {retries} percobaan: {type(last).__name__}: {last}") from last
 
 
 def find_folder(service, folder_name: str) -> dict:
@@ -46,17 +140,21 @@ def find_folder(service, folder_name: str) -> dict:
         f"mimeType = 'application/vnd.google-apps.folder' "
         f"and name = '{safe_name}' and trashed = false"
     )
-    res = (
-        service.files()
-        .list(
-            q=q,
-            spaces="drive",
-            fields="files(id, name, modifiedTime, webViewLink)",
-            orderBy="modifiedTime desc",
-            pageSize=5,
+
+    def _op(svc):
+        return (
+            svc.files()
+            .list(
+                q=q,
+                spaces="drive",
+                fields="files(id, name, modifiedTime, webViewLink)",
+                orderBy="modifiedTime desc",
+                pageSize=5,
+            )
+            .execute(num_retries=INNER_RETRIES)
         )
-        .execute()
-    )
+
+    res = _call_with_retry(f"cari folder '{folder_name}'", service, _op)
     folders = res.get("files", [])
     if not folders:
         raise FileNotFoundError(f"Folder '{folder_name}' tidak ditemukan di Google Drive.")
@@ -73,17 +171,20 @@ def list_folder_files(service, folder_id: str) -> list:
     items = []
     page_token = None
     while True:
-        res = (
-            service.files()
-            .list(
-                q=q,
-                spaces="drive",
-                fields="nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)",
-                pageSize=100,
-                pageToken=page_token,
+        def _op(svc, _tok=page_token):
+            return (
+                svc.files()
+                .list(
+                    q=q,
+                    spaces="drive",
+                    fields="nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)",
+                    pageSize=100,
+                    pageToken=_tok,
+                )
+                .execute(num_retries=INNER_RETRIES)
             )
-            .execute()
-        )
+
+        res = _call_with_retry("daftar file folder", service, _op)
         items.extend(res.get("files", []))
         page_token = res.get("nextPageToken")
         if not page_token:
@@ -94,12 +195,16 @@ def list_folder_files(service, folder_id: str) -> list:
 def download_file(service, file_id: str, dest_path: str):
     """Unduh satu file dari Google Drive ke disk lokal."""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    request = service.files().get_media(fileId=file_id)
-    with io.FileIO(dest_path, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+
+    def _op(svc):
+        request = svc.files().get_media(fileId=file_id)
+        with io.FileIO(dest_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request, chunksize=DOWNLOAD_CHUNK)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk(num_retries=INNER_RETRIES)
+
+    _call_with_retry(f"unduh {os.path.basename(dest_path)}", service, _op)
 
 
 def download_project_assets(service, folder_id: str, local_dir: str, include_media: bool = True) -> dict:
@@ -114,7 +219,7 @@ def download_project_assets(service, folder_id: str, local_dir: str, include_med
     for f in files:
         name = f["name"]
         low = name.lower()
-        if any(ex in low for ex in ("output_", "short_")):
+        if any(ex in low for ex in ("output_", "short_", "long_")):
             continue
         is_meta = low in meta_names or low.startswith("transkrip")
         is_audio = low.endswith(audio_ext)
@@ -134,22 +239,44 @@ def upload_or_update_file(service, folder_id: str, local_path: str, remote_name:
     name = remote_name or os.path.basename(local_path)
     safe_name = name.replace("'", "\\'")
     q = f"'{folder_id}' in parents and name = '{safe_name}' and trashed = false"
-    existing = service.files().list(q=q, fields="files(id, name)").execute().get("files", [])
+    size_mb = os.path.getsize(local_path) / (1024 * 1024)
 
-    media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
-    if existing:
-        file_id = existing[0]["id"]
-        updated = (
-            service.files()
-            .update(fileId=file_id, media_body=media, fields="id, name, webViewLink")
-            .execute()
+    def _op(svc):
+        existing = (
+            svc.files()
+            .list(q=q, fields="files(id, name)")
+            .execute(num_retries=INNER_RETRIES)
+            .get("files", [])
         )
-        return updated
+        media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=UPLOAD_CHUNK, resumable=True)
+        try:
+            if existing:
+                request = svc.files().update(
+                    fileId=existing[0]["id"], media_body=media, fields="id, name, webViewLink"
+                )
+            else:
+                request = svc.files().create(
+                    body={"name": name, "parents": [folder_id]},
+                    media_body=media,
+                    fields="id, name, webViewLink",
+                )
+            response, last_pct = None, -1
+            while response is None:
+                status, response = request.next_chunk(num_retries=INNER_RETRIES)
+                if status:
+                    pct = int(status.progress() * 100)
+                    if pct >= last_pct + 20:
+                        last_pct = pct
+                        print(f"[Drive] Upload {name}: {pct}%")
+            return response
+        finally:
+            fd = getattr(media, "_fd", None)
+            if fd is not None:
+                try:
+                    fd.close()
+                except Exception:
+                    pass
 
-    meta = {"name": name, "parents": [folder_id]}
-    created = (
-        service.files()
-        .create(body=meta, media_body=media, fields="id, name, webViewLink")
-        .execute()
-    )
-    return created
+    result = _call_with_retry(f"upload {name} ({size_mb:.1f} MB)", service, _op)
+    print(f"[Drive] Upload selesai: {name}")
+    return result
