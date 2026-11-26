@@ -1,0 +1,122 @@
+name: Render Video Panjang Landscape (16:9)
+
+on:
+  workflow_dispatch:
+    inputs:
+      folder_name:
+        description: 'Nama folder proyek di Google Drive'
+        required: true
+        type: string
+      mode:
+        description: 'Mode: plan, render, auto, edit'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - render
+          - auto
+          - edit
+      theme:
+        description: 'Tema warna visual'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - hutan
+          - laut
+          - api
+          - malam
+          - bumi
+      note:
+        description: 'Catatan khusus proyek'
+        required: false
+        default: ''
+        type: string
+      edit_cmd:
+        description: 'Perintah edit dari Telegram'
+        required: false
+        default: ''
+        type: string
+      chat_id:
+        description: 'Telegram Chat ID'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: render-long-${{ github.event.inputs.folder_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-long-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libcups2 libatk-bridge2.0-0 libxkbcommon-dev libxrandr2 libxfixes3 libxcomposite1 libxdamage1 libpango-1.0-0 libcairo2
+          sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2
+
+      - name: Cache HuggingFace Whisper models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-whisper-${{ runner.os }}-small-v1
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Setup & Cache Remotion environment
+        run: |
+          python -c "import remotion_builder; remotion_builder.prepare_remotion_project('/tmp/remotion_overlay')"
+
+      - name: Cache Remotion node_modules
+        id: cache-remotion
+        uses: actions/cache@v4
+        with:
+          path: /tmp/remotion_overlay/node_modules
+          key: remotion-nm-${{ runner.os }}-4.0.352-gf1
+
+      - name: Install Remotion npm packages
+        if: steps.cache-remotion.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp/remotion_overlay && npm install --no-audit --no-fund
+
+      - name: Jalankan Pipeline Video Panjang
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN_LONG }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          INPUT_FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+          INPUT_THEME: ${{ github.event.inputs.theme }}
+          INPUT_NOTE: ${{ github.event.inputs.note }}
+          INPUT_EDIT_CMD: ${{ github.event.inputs.edit_cmd }}
+          INPUT_CHAT_ID: ${{ github.event.inputs.chat_id }}
+          VIDEO_MODE: "LONG"
+        run: |
+          python main.py
