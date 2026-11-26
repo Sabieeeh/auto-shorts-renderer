@@ -14,7 +14,10 @@ from scipy.signal import butter, sosfilt
 import anthropic
 from remotion_builder import prepare_remotion_project, download_geo_assets
 
-FPS, W, H = 30, 1080, 1920
+IS_LONG = os.environ.get("VIDEO_MODE", "").strip().upper() == "LONG"
+FPS = 30
+W = 1920 if IS_LONG else 1080
+H = 1080 if IS_LONG else 1920
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 VID_EXT = (".mov", ".mp4")
@@ -22,11 +25,11 @@ STILL_DUR = 5.0          # durasi klip dari gambar diam (detik)
 STILL_KB_END = 1.08      # Ken Burns gambar: skala akhir (awal = 1.0)
 DRIFT = 0.06             # micro-zoom drift per shot video (1.0 -> 1.06)
 CUT_FRAMES = 6           # panjang transisi whip-pan / cross-zoom di tepi shot
-GRAIN = 3               # kekuatan film grain di komposit akhir (0 = mati); grain besar membengkakkan ukuran file
-FINAL_CRF = 23           # kualitas encode akhir
-FINAL_MAXRATE = "9M"     # batas bitrate -> 40 detik sekitar 45 MB
-OVERLAY_MAX = 8          # maksimal overlay per video (termasuk hook & CTA)
-OVERLAY_MIN_GAP = 5.0    # jeda minimal (detik) antara akhir satu overlay dan awal berikutnya
+GRAIN = 3                # kekuatan film grain di komposit akhir (0 = mati)
+FINAL_CRF = 22 if IS_LONG else 23
+FINAL_MAXRATE = "10M" if IS_LONG else "9M"
+OVERLAY_MAX = 25 if IS_LONG else 8
+OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
 
 THEMES = {
     "hutan": dict(g=(31, 61, 43), d=(22, 46, 32), m=(45, 92, 67), c=(242, 232, 213), a=(224, 138, 46), k=(17, 17, 17), v=(8, 20, 13)),
@@ -37,6 +40,10 @@ THEMES = {
 }
 
 DEFAULT_STYLE_NOTE = (
+    "Format video panjang landscape 16:9 dokumenter. Susun 15-25 overlay yang informatif, "
+    "kombinasikan big, lower, list, dan qmark. Batasi icon maksimal 3 kali. "
+    "Pakai overlay map hanya jika transkrip menyebut lokasi geografis nyata atau diminta di catatan proyek."
+    if IS_LONG else
     "Gunakan kombinasi dinamis big, lower, list, dan qmark. "
     "Batasi overlay tipe icon maksimal 2-3 kali saja agar tidak monoton. "
     "Pakai overlay map hanya jika transkrip menyebut lokasi geografis nyata atau diminta di catatan proyek."
@@ -73,18 +80,14 @@ def probe(path: str) -> dict:
 
 
 def still_to_clip(src: str, out_p: str, dur: float = STILL_DUR) -> bool:
-    """Ubah gambar diam (mis. tangkapan layar berita) menjadi klip mp4 1080x1920 30 fps.
-
-    Latar: versi gambar yang di-blur (boxblur=25:5) memenuhi layar 9:16.
-    Depan: gambar tajam di tengah, dibuat membesar halus 1.0 -> 1.08 (Ken Burns)
-    tanpa terpotong. Ukuran akhir gambar tajam maksimal 1080x1620.
-    """
+    """Ubah gambar diam menjadi klip mp4 sesuai orientasi (1920x1080 atau 1080x1920) 30 fps."""
     try:
         info = probe(src)
         iw, ih = int(info.get("w") or 0), int(info.get("h") or 0)
         if iw <= 0 or ih <= 0:
             return False
-        sc = min(W / iw, 1620 / ih)
+        max_fg_h = int(H * 0.88)
+        sc = min(W / iw, max_fg_h / ih)
         fw, fh = max(2, int(iw * sc) // 2 * 2), max(2, int(ih * sc) // 2 * 2)
         k0 = 1.0 / STILL_KB_END
         grow = f"({k0:.5f}+(1-{k0:.5f})*t/{dur:.3f})"
@@ -108,7 +111,6 @@ def still_to_clip(src: str, out_p: str, dur: float = STILL_DUR) -> bool:
 
 
 def prepare_still_clips(clips: list, work_dir: str) -> list:
-    """Konversi semua klip gambar menjadi mp4 sementara sebelum masuk ke timeline."""
     still_dir = os.path.join(work_dir, "stills")
     os.makedirs(still_dir, exist_ok=True)
     for c in clips:
@@ -116,7 +118,7 @@ def prepare_still_clips(clips: list, work_dir: str) -> list:
             continue
         out_p = os.path.join(still_dir, f"{c['key']}.mp4")
         if os.path.exists(out_p) or still_to_clip(c["path"], out_p):
-            c.update(path=out_p, dur=STILL_DUR, is_img=False, vertical=True, still=True)
+            c.update(path=out_p, dur=STILL_DUR, is_img=False, vertical=(not IS_LONG), still=True)
             print("Gambar -> klip:", c["name"])
         else:
             c["dur"] = STILL_DUR
@@ -124,12 +126,10 @@ def prepare_still_clips(clips: list, work_dir: str) -> list:
 
 
 def cut_kind(i: int) -> str:
-    """Jenis transisi pada sambungan shot i -> i+1: selang-seling cross-zoom dan whip-pan."""
     return "zoom" if i % 2 == 0 else "whip"
 
 
 def motion_filter(fr: int, drift: float, kin, kout, src_scale: bool = True) -> str:
-    """zoompan: micro-zoom drift + transisi whip-pan / optical cross-zoom di tepi shot."""
     n = CUT_FRAMES
     terms = []
     if drift:
@@ -304,12 +304,14 @@ def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"
 def build_captions(words: list, units: list, keywords: list, dur: float) -> list:
     kw_tok = [[norm(x) for x in k.split()] for k in keywords]
     kw_single = {w for kw in kw_tok for w in kw if len(w) >= 6}
+    max_line_chars = 68 if IS_LONG else 42
+    max_half_chars = 36 if IS_LONG else 21
 
     def split_groups(ws):
         txt = " ".join(w["w"] for w in ws)
-        if len(txt) <= 42:
+        if len(txt) <= max_line_chars:
             return [ws]
-        k = math.ceil(len(txt) / 42)
+        k = math.ceil(len(txt) / max_line_chars)
         target = len(txt) / k
         groups, cur = [], []
         for w in ws:
@@ -323,7 +325,7 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
 
     def break2(ws):
         n = len(ws)
-        if len(" ".join(w["w"] for w in ws)) <= 21 or n < 4:
+        if len(" ".join(w["w"] for w in ws)) <= max_half_chars or n < 4:
             return [ws]
         best = min(((max(len(" ".join(x["w"] for x in ws[:i])), len(" ".join(x["w"] for x in ws[i:]))), i) for i in range(2, n - 1)), key=lambda x: x[0])
         return [ws[:best[1]], ws[best[1]:]]
@@ -362,11 +364,11 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
 
 
 def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float) -> list:
-    default_dur = {"lower": 2.4, "icon": 3.0, "qmark": 2.0, "big": 2.6, "solid": 3.0, "quote": 4.0, "list": 3.8, "produk": 4.0, "map": 3.6}
+    default_dur = {"lower": 2.8 if IS_LONG else 2.4, "icon": 3.2, "qmark": 2.4, "big": 2.8, "solid": 3.2, "quote": 4.2, "list": 4.2, "produk": 4.0, "map": 4.2}
     ovs = []
-    extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
+    extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.4 if IS_LONG else 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
     if cta_text:
-        extra.append({"type": "big", "at": max(0.0, dur - 2.6), "lines": [cta_text], "dur": 2.5, "sfx": "hit", "_fixed": True})
+        extra.append({"type": "big", "at": max(0.0, dur - 2.8), "lines": [cta_text], "dur": 2.6, "sfx": "hit", "_fixed": True})
 
     for o in extra + overlays:
         o = json.loads(json.dumps(o))
@@ -398,8 +400,6 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
             o["t0"] = words[i]["t0"]
         ovs.append(o)
 
-    # Ruang bernapas: maksimal OVERLAY_MAX overlay, jeda minimal OVERLAY_MIN_GAP detik.
-    # Hook & CTA selalu dipertahankan; sisanya dipilih menurut prioritas tipe.
     prio = {"map": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3}
 
     def _span(o):
@@ -439,7 +439,10 @@ def run_auto_director(client: anthropic.Anthropic, text: str, style_note: str, p
     if project_note.strip():
         note_combined += f"\nCATATAN KHUSUS PROYEK INI: {project_note.strip()}"
 
-    dir_prompt = f"""Kamu adalah sutradara motion graphic YouTube Shorts dokumenter Indonesia.
+    target_ov = "15 sampai 25 item" if IS_LONG else "6 sampai 8 item"
+    fmt_label = "YouTube dokumenter layar lebar 16:9" if IS_LONG else "YouTube Shorts dokumenter Indonesia"
+
+    dir_prompt = f"""Kamu adalah sutradara motion graphic {fmt_label}.
 Baca transkrip narasi VO berikut dan susun rencana visual overlay yang tajam, padat, bervariasi, dan sinkron dengan kalimat narasi.
 
 TRANSKRIP:
@@ -450,21 +453,21 @@ CATATAN GAYA & PROYEK:
 
 ATURAN WAJIB:
 1. Pilih "theme" paling cocok dari: "api", "hutan", "bumi", "laut", "malam".
-2. Buat 6 sampai 8 item di array "overlays" (JANGAN lebih dari 8; B-roll dokumenter dan kliping berita harus tetap dominan, dan tiap overlay berjarak minimal ~8 detik dari yang lain). Pilih hanya momen penekanan paling strategis. Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
-3. Variasikan "type" overlay (batasi tipe "icon" maksimal 2-3 kali saja, utamakan "big", "lower", "list", dan "qmark"):
-   - "big": {{"type":"big", "trigger":"...", "lines":["BARIS 1", "BARIS 2"]}} (maks 2-3 baris pendek, kapitals)
-   - "lower": {{"type":"lower", "trigger":"...", "badge":"SOROTAN FAKTA", "text":"TEKS SINGKAT"}}
-   - "list": {{"type":"list", "trigger":"...", "title":"JUDUL DAFTAR", "items":[{{"text":"POIN 1"}}, {{"text":"POIN 2"}}, {{"text":"POIN 3"}}]}}
-   - "icon": {{"type":"icon", "trigger":"...", "icon":"api|bahaya|fakta|berita|waktu|silang|centang", "label":"LABEL SINGKAT"}}
-   - "qmark": {{"type":"qmark", "trigger":"...", "label":"PERTANYAAN SINGKAT?"}}
-   - "map": {{"type":"map", "trigger":"...", "pin":[106.25, -6.62], "zoom":55, "label":"NAMA LOKASI", "sub":"KABUPATEN / PROVINSI"}}
-4. Semua teks di dalam overlay HARUS singkat (maksimal 3-5 kata per baris/item) dan menggunakan huruf KAPITAL.
+2. Buat {target_ov} di array "overlays" (tiap overlay berjarak minimal ~10 detik dari yang lain). Pilih momen penekanan paling strategis. Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
+3. Variasikan "type" overlay (utamakan "big", "lower", "list", dan "qmark"):
+  - "big": {{"type":"big", "trigger":"...", "lines":["BARIS 1", "BARIS 2"]}} (maks 2-3 baris pendek, kapitals)
+  - "lower": {{"type":"lower", "trigger":"...", "badge":"SOROTAN FAKTA", "text":"TEKS SINGKAT"}}
+  - "list": {{"type":"list", "trigger":"...", "title":"JUDUL DAFTAR", "items":[{{"text":"POIN 1"}}, {{"text":"POIN 2"}}, {{"text":"POIN 3"}}]}}
+  - "icon": {{"type":"icon", "trigger":"...", "icon":"api|bahaya|fakta|berita|waktu|silang|centang", "label":"LABEL SINGKAT"}}
+  - "qmark": {{"type":"qmark", "trigger":"...", "label":"PERTANYAAN SINGKAT?"}}
+  - "map": {{"type":"map", "trigger":"...", "pin":[106.25, -6.62], "zoom":55, "label":"NAMA LOKASI", "sub":"KABUPATEN / PROVINSI"}}
+4. Semua teks di dalam overlay HARUS singkat (maksimal 3-6 kata per baris/item) dan menggunakan huruf KAPITAL.
 5. Keluarkan HANYA JSON valid tanpa markdown ```json atau penjelasan lain dengan struktur:
 {{"theme":"...","topic":"...","hook_lines":["...","..."],"keywords":["KATA1","KATA2","KATA3","KATA4","KATA5"],"overlays":[...]}}"""
 
     resp = client.messages.create(
         model=model,
-        max_tokens=3500,
+        max_tokens=4096,
         messages=[{"role": "user", "content": dir_prompt}],
     )
     txt = _extract_claude_text(resp)
@@ -479,7 +482,7 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
     cands = [
         p for p in sorted(glob.glob(f"{proj_dir}/*"))
         if p.lower().endswith(VID_EXT + IMG_EXT)
-        and not any(x in os.path.basename(p).lower() for x in ("output_", "short_"))
+        and not any(x in os.path.basename(p).lower() for x in ("output_", "short_", "long_"))
     ]
     clips = []
     for p in cands:
@@ -487,8 +490,6 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
         info = probe(p)
         is_img = p.lower().endswith(IMG_EXT)
         if is_img:
-            # ffprobe melaporkan ~0.04 dtk untuk gambar diam; tanpa koreksi ini gambar
-            # selalu ditolak pick_shot() karena dianggap terlalu pendek.
             info["dur"] = STILL_DUR
         key = re.sub(r"\W", "_", name)
         info.update(path=p, name=name, key=key, is_img=is_img)
@@ -498,7 +499,7 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
             if is_img:
                 sh(["ffmpeg", "-y", "-v", "error", "-i", p, "-vf", "scale=480:-2", "-q:v", "4", f"{d}/0001.jpg"])
             else:
-                sh(["ffmpeg", "-y", "-v", "error", "-i", p, "-vf", "fps=2,scale=480:-2", "-q:v", "4", f"{d}/%04d.jpg"])
+                sh(["ffmpeg", "-y", "-v", "error", "-i", p, "-vf", "fps=1,scale=480:-2", "-q:v", "4", f"{d}/%04d.jpg"])
         info["frames"] = sorted(glob.glob(f"{d}/*.jpg"))
         clips.append(info)
     return clips
@@ -593,7 +594,7 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
     try:
         r2 = client.messages.create(
             model=model,
-            max_tokens=2500,
+            max_tokens=3000,
             tools=[match_tool],
             tool_choice={"type": "auto"},
             messages=[
@@ -619,7 +620,6 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
 
 
 def apply_edit_command(state: dict, raw_cmd: str) -> dict:
-    """Terapkan perintah edit cepat dari Telegram (mis. /hapus BARU | 4, 6 atau /tema BARU | hutan)."""
     cmd_part = raw_cmd.split("|", 1)[1].strip() if "|" in raw_cmd else raw_cmd.strip()
     low = raw_cmd.strip().lower()
 
@@ -675,7 +675,6 @@ def apply_edit_command(state: dict, raw_cmd: str) -> dict:
 
 
 def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str = "/tmp/remotion_overlay") -> str:
-    """Render B-roll FFmpeg + Overlay Remotion + Audio Mix -16 LUFS."""
     vo_path = os.path.join(work_dir, "VO_padat.wav")
     if not os.path.exists(vo_path):
         audio_cands = sorted(glob.glob(f"{proj_dir}/*.mp3") + glob.glob(f"{proj_dir}/*.m4a") + glob.glob(f"{proj_dir}/*.wav"))
@@ -709,12 +708,14 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     clips = prepare_still_clips(clips, work_dir)
 
     # 1. Potong & susun B-roll
-    hook_cut, body_cut, hook_window = 1.4, 2.4, 3.0
+    hook_cut = 2.2 if IS_LONG else 1.4
+    body_cut = 4.2 if IS_LONG else 2.4
+    hook_window = 5.0 if IS_LONG else 3.0
     grade = "eq=contrast=1.04:saturation=1.05:gamma_r=1.03:gamma_b=0.96,colorbalance=rm=0.03:bm=-0.03"
     cut_ts = [0.0]
     while cut_ts[-1] < dur - 0.01:
         step = hook_cut if cut_ts[-1] < hook_window else body_cut
-        if dur - (cut_ts[-1] + step) < 1.2:
+        if dur - (cut_ts[-1] + step) < 1.5:
             step = dur - cut_ts[-1]
         cut_ts.append(min(cut_ts[-1] + step, dur))
     bounds = [round(t * FPS) for t in cut_ts]
@@ -764,15 +765,19 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     os.makedirs(shots_dir, exist_ok=True)
 
     phone_png = os.path.join(work_dir, "phone.png")
-    sd = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(sd).rounded_rectangle([80, 427, 1000, 962], radius=56, fill=(0, 0, 0, 130))
-    l_ph = sd.filter(ImageFilter.GaussianBlur(18))
-    d_ph = ImageDraw.Draw(l_ph)
-    d_ph.rounded_rectangle([80, 413, 1000, 948], radius=56, fill=(17, 17, 17, 255), outline=(64, 64, 64, 255), width=3)
-    hole = Image.new("L", (W, H), 255)
-    ImageDraw.Draw(hole).rounded_rectangle([100, 433, 980, 928], radius=26, fill=0)
-    l_ph.putalpha(Image.fromarray(np.minimum(np.array(l_ph.getchannel("A")), np.array(hole)).astype(np.uint8)))
-    l_ph.save(phone_png)
+    if not IS_LONG:
+        sd = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(sd).rounded_rectangle([80, 427, 1000, 962], radius=56, fill=(0, 0, 0, 130))
+        l_ph = sd.filter(ImageFilter.GaussianBlur(18))
+        d_ph = ImageDraw.Draw(l_ph)
+        d_ph.rounded_rectangle([80, 413, 1000, 948], radius=56, fill=(17, 17, 17, 255), outline=(64, 64, 64, 255), width=3)
+        hole = Image.new("L", (W, H), 255)
+        ImageDraw.Draw(hole).rounded_rectangle([100, 433, 980, 928], radius=26, fill=0)
+        l_ph.putalpha(Image.fromarray(np.minimum(np.array(l_ph.getchannel("A")), np.array(hole)).astype(np.uint8)))
+        l_ph.save(phone_png)
+
+    scale_up_w = int(W * 1.5)
+    scale_up_h = int(H * 1.5)
 
     def render_shot(s):
         c, fr = s["clip"], s["frames"]
@@ -780,30 +785,48 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         kin = cut_kind(s["i"] - 1) if s["i"] > 0 else None
         kout = cut_kind(s["i"]) if s["i"] < n_sh - 1 else None
         still = bool(c.get("still"))
-        drift = 0.0 if still else DRIFT   # klip gambar sudah punya Ken Burns sendiri
+        drift = 0.0 if still else DRIFT
         pre = ["-stream_loop", "-1"] if s["loop"] else []
         if c["is_img"]:
             pre = ["-loop", "1"]
         base = ["ffmpeg", "-y", "-v", "error"] + pre + ["-ss", f"{s['ss']:.3f}", "-t", f"{s['dur'] + 0.4:.3f}", "-i", c["path"], "-an"]
         out = ["-frames:v", str(fr), "-r", "30", "-c:v", "libx264", "-crf", "16", "-preset", "ultrafast", "-pix_fmt", "yuv420p", out_p]
-        if c.get("vertical", True):
+        if IS_LONG:
             g = "" if still else f"{grade},"
-            vf = (
-                f"fps=30,{g}scale=1620:2880:force_original_aspect_ratio=increase,crop=1620:2880,"
-                f"{motion_filter(fr, drift, kin, kout)},format=yuv420p"
-            )
-            sh(base + ["-vf", vf] + out)
+            if c.get("vertical", False) and not still:
+                # Klip HP berdiri di layar lebar 16:9 -> latar blur + klip utama di tengah tanpa terpotong
+                fc = (
+                    f"[0:v]fps=30,{grade},split=2[a][b];"
+                    f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=35:6,eq=brightness=-0.12[bg];"
+                    f"[b]scale=-2:{H}:flags=lanczos[fg];"
+                    f"[bg][fg]overlay=x='(W-w)/2':y='(H-h)/2',scale={scale_up_w}:{scale_up_h},{motion_filter(fr, drift, kin, kout)},format=yuv420p[v]"
+                )
+                sh(base + ["-filter_complex", fc, "-map", "[v]"] + out)
+            else:
+                vf = (
+                    f"fps=30,{g}scale={scale_up_w}:{scale_up_h}:force_original_aspect_ratio=increase,crop={scale_up_w}:{scale_up_h},"
+                    f"{motion_filter(fr, drift, kin, kout)},format=yuv420p"
+                )
+                sh(base + ["-vf", vf] + out)
         else:
-            zp = f"zoompan=z='1+{DRIFT}*on/{max(fr - 1, 1)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=880x495:fps=30"
-            fc = (
-                f"[0:v]fps=30,{grade},split=2[a][b];"
-                f"[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=40:6,eq=brightness=-0.12[bg];"
-                f"[b]scale=880:495:force_original_aspect_ratio=increase,crop=880:495,{zp}[fg];"
-                f"[bg][fg]overlay=100:433[t];[t][1:v]overlay=0:0:format=auto,format=yuv420p[v0];"
-                f"[v0]scale=1620:2880,{motion_filter(fr, 0.0, kin, kout)},format=yuv420p[v]"
-            )
-            inp = base[:-1] + ["-loop", "1", "-i", phone_png, "-an"]
-            sh(inp + ["-filter_complex", fc, "-map", "[v]"] + out)
+            if c.get("vertical", True):
+                g = "" if still else f"{grade},"
+                vf = (
+                    f"fps=30,{g}scale=1620:2880:force_original_aspect_ratio=increase,crop=1620:2880,"
+                    f"{motion_filter(fr, drift, kin, kout)},format=yuv420p"
+                )
+                sh(base + ["-vf", vf] + out)
+            else:
+                zp = f"zoompan=z='1+{DRIFT}*on/{max(fr - 1, 1)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=880x495:fps=30"
+                fc = (
+                    f"[0:v]fps=30,{grade},split=2[a][b];"
+                    f"[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=40:6,eq=brightness=-0.12[bg];"
+                    f"[b]scale=880:495:force_original_aspect_ratio=increase,crop=880:495,{zp}[fg];"
+                    f"[bg][fg]overlay=100:433[t];[t][1:v]overlay=0:0:format=auto,format=yuv420p[v0];"
+                    f"[v0]scale=1620:2880,{motion_filter(fr, 0.0, kin, kout)},format=yuv420p[v]"
+                )
+                inp = base[:-1] + ["-loop", "1", "-i", phone_png, "-an"]
+                sh(inp + ["-filter_complex", fc, "-map", "[v]"] + out)
         return out_p
 
     workers = max(1, min(4, os.cpu_count() or 2))
@@ -816,7 +839,8 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     list_txt = os.path.join(work_dir, "list.txt")
     with open(list_txt, "w") as fh:
         for s in shots:
-            shot_p = os.path.join(shots_dir, f"s{s['i']:03d}.mp4"); fh.write(f"file '{shot_p}'\n")
+            shot_p = os.path.join(shots_dir, f"s{s['i']:03d}.mp4")
+            fh.write(f"file '{shot_p}'\n")
     base_mp4 = os.path.join(work_dir, "base.mp4")
     sh(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", list_txt, "-c", "copy", base_mp4])
 
@@ -830,13 +854,13 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         "hex": {"green": _hex(_t["g"]), "dark": _hex(_t["d"]), "mid": _hex(_t["m"]), "cream": _hex(_t["c"]), "orange": _hex(_t["a"]), "black": _hex(_t["k"])},
         "vars": {"--g": "%d,%d,%d" % _t["g"], "--d": "%d,%d,%d" % _t["d"], "--a": "%d,%d,%d" % _t["a"], "--c": "%d,%d,%d" % _t["c"], "--v": "%d,%d,%d" % _t["v"]},
     }
-    # Salinan buram video dasar -> latar kartu "glassmorphism" (blur sungguhan di belakang kartu)
     glass_src = None
     try:
         blur_p = f"{remo_dir}/public/base_blur.mp4"
+        bw, bh = (480, 270) if IS_LONG else (270, 480)
         sh([
             "ffmpeg", "-y", "-v", "error", "-i", base_mp4,
-            "-vf", "scale=270:480:flags=area,gblur=sigma=2.2,scale=1080:1920:flags=bicubic,eq=brightness=-0.04",
+            "-vf", f"scale={bw}:{bh}:flags=area,gblur=sigma=2.2,scale={W}:{H}:flags=bicubic,eq=brightness=-0.04",
             "-an", "-c:v", "libx264", "-crf", "24", "-preset", "veryfast", "-g", "15", "-pix_fmt", "yuv420p", blur_p,
         ])
         glass_src = "base_blur.mp4"
@@ -906,9 +930,9 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
 
     # 4. Penggabungan final
     slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")[:40] or "video"
-    out_name = f"Short_{slug}.mp4"
+    prefix = "Long" if IS_LONG else "Short"
+    out_name = f"{prefix}_{slug}.mp4"
     final_mp4 = os.path.join(work_dir, out_name)
-    # Global adjustment layer (paling atas): vignette sinematik + film grain halus
     fc_final = (
         "[1:v]format=rgba[ov];[0:v][ov]overlay=0:0:format=auto,format=yuv420p,"
         "vignette=angle=PI/4.5" + (f",noise=alls={GRAIN}:allf=t" if GRAIN else "") + "[v]"
@@ -920,7 +944,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         + [
             "-i", mix_wav, "-filter_complex", fc_final,
             "-map", "[v]", "-map", "2:a", "-frames:v", str(n_frames),
-            "-c:v", "libx264", "-crf", str(FINAL_CRF), "-maxrate", FINAL_MAXRATE, "-bufsize", "18M", "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-crf", str(FINAL_CRF), "-maxrate", FINAL_MAXRATE, "-bufsize", "20M", "-preset", "medium", "-pix_fmt", "yuv420p",
             "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart", final_mp4,
         ]
