@@ -1,14 +1,11 @@
 import os
-import json
-import time
-import urllib.request
 
 IS_LONG = os.environ.get("VIDEO_MODE", "").strip().upper() == "LONG"
 OUT_W = 1920 if IS_LONG else 1080
 OUT_H = 1080 if IS_LONG else 1920
 
 REMO_FILES = {
-    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","d3-geo":"3.1.1","@remotion/google-fonts":"4.0.352"}}""",
+    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352"}}""",
     "tsconfig.json": r"""{"compilerOptions":{"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":false,"skipLibCheck":true,"esModuleInterop":true,"noEmit":true},"include":["src"]}""",
     "src/index.ts": r"""import {registerRoot} from "remotion";
 import {Root} from "./Root";
@@ -35,17 +32,16 @@ export const Root: React.FC = () => {{
   );
 }};
 """,
-    "src/Overlay.tsx": r"""import React, {createContext, useContext, useEffect, useMemo, useState} from "react";
+    "src/Overlay.tsx": r"""import React, {createContext, useContext, useMemo} from "react";
 import {
   AbsoluteFill, Sequence, OffthreadVideo, useCurrentFrame, useVideoConfig, spring, interpolate,
-  Easing, random, staticFile, delayRender, continueRender,
+  Easing, random, staticFile,
 } from "remotion";
-import {geoMercator, geoPath, geoContains, geoGraticule} from "d3-geo";
 import {loadFont as loadMontserrat} from "@remotion/google-fonts/Montserrat";
 import {loadFont as loadOswald} from "@remotion/google-fonts/Oswald";
 import {loadFont as loadPlayfair} from "@remotion/google-fonts/PlayfairDisplay";
 
-const mont: any = loadMontserrat("normal", {weights: ["800"], subsets: ["latin"]});
+const mont: any = loadMontserrat("normal", {weights: ["600", "800"], subsets: ["latin"]});
 const osw: any = loadOswald("normal", {weights: ["700"], subsets: ["latin"]});
 const play: any = loadPlayfair("italic", {weights: ["700"], subsets: ["latin"]});
 
@@ -64,11 +60,27 @@ const CfgCtx = createContext<any>({glass: null});
 const clamp: any = {extrapolateLeft: "clamp", extrapolateRight: "clamp"};
 const SPR = {damping: 18, stiffness: 220, mass: 0.7};
 const up = (s: any) => String(s || "").toUpperCase();
+
+// ZONA AMAN VERTIKAL: overlay berada di top..bottom, subtitle dipatok di `sub` agar tidak menumpuk.
+const ZONE = (isLand: boolean) => ({
+  top: isLand ? 90 : 300,
+  bottom: isLand ? 800 : 1120,
+  sub: isLand ? 996 : 1470,
+});
+const zoneMid = (isLand: boolean) => (ZONE(isLand).top + ZONE(isLand).bottom) / 2;
+
+const clipWords = (s: string, n: number) => {
+  const t = String(s || "").replace(/\s+/g, " ").trim();
+  if (t.length <= n) return t;
+  const cut = t.slice(0, n);
+  const i = cut.lastIndexOf(" ");
+  return (i > 8 ? cut.slice(0, i) : cut).trim();
+};
+
+const SUB_SHADOW = "0 1px 2px rgba(0,0,0,0.55), 0 2px 10px rgba(0,0,0,0.35)";
+
 const fitSize = (txt: string, max: number, width: number) =>
   Math.max(24, Math.min(max, width / (Math.max(txt.length, 1) * 0.78)));
-
-const titleCase = (s: any) =>
-  String(s || "").toLowerCase().replace(/(^|[\s\/\-])([a-z\u00e0-\u00ff])/g, (_m: string, a: string, b: string) => a + b.toUpperCase());
 
 const keyWord = (text: string): string => {
   const ws = String(text || "").split(/\s+/).filter(Boolean);
@@ -192,8 +204,8 @@ const Big: React.FC<any> = ({o, dur}) => {
   const accentIdx = starIdx >= 0 ? starIdx : (lines.length > 1 ? lines.length - 1 : -1);
   const sBar = Math.min(1, spring({frame: f - lines.length * 4 - 4, fps, config: SPR}));
   const bgOp = interpolate(f, [0, 8], [0, 1], clamp);
-  const boxTop = isLand ? 160 : 330;
   const boxH = isLand ? 560 : 700;
+  const boxTop = Math.round(zoneMid(isLand) - boxH / 2);
   const maxW = isLand ? 1560 : 860;
   return (
     <Scene dur={dur}>
@@ -216,7 +228,7 @@ const Big: React.FC<any> = ({o, dur}) => {
             <Reveal key={i} delay={i * 4} style={{textAlign: "center", maxWidth: width - 140}}>
               <div style={{
                 fontFamily: accent ? F_SERIF : F_DISPLAY, fontStyle: accent ? "italic" : "normal",
-                fontWeight: accent ? 700 : 800, fontSize: size, lineHeight: 1.12,
+                fontWeight: accent ? 700 : 800, fontSize: size, lineHeight: 1.15,
                 color: accent ? C.black : C.cream, letterSpacing: accent ? 0 : 1.5,
                 WebkitTextStroke: accent ? "0px transparent" : `8px ${C.black}`, paintOrder: "stroke fill",
                 textShadow: accent ? "none" : "0 8px 34px rgba(0,0,0,0.85)",
@@ -248,15 +260,17 @@ const Lower: React.FC<any> = ({o, dur}) => {
   const isLand = width > height;
   const s = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
   const prog = interpolate(f, [0, dur], [0, 100], clamp);
-  const badge = up(o.badge || "SOROTAN FAKTA");
+  const badge = up(o.badge || "CATATAN BUDAYA");
   const lines = wrapLines([up(o.text)], isLand ? 42 : 22).slice(0, 2).map((l) => l.replace(/^\*/, ""));
   const size = fitSize(lines.reduce((a, b) => (a.length >= b.length ? a : b), ""), isLand ? 38 : 44, isLand ? 1100 : 820);
+  const lh = Math.round(size * 1.25);
+  const gh = 22 + 28 + 8 + lines.length * lh + 26;
   const gx = isLand ? 80 : 60;
-  const gy = isLand ? 680 : 880;
   const gw = isLand ? 1240 : 960;
+  const gy = ZONE(isLand).bottom - gh;
   return (
     <Scene dur={dur} moving={false}>
-      <Glass o={o} x={gx} y={gy} w={gw} style={{transform: `translateX(${(1 - s) * -80}px)`, opacity: Math.min(1, s * 1.6)}}>
+      <Glass o={o} x={gx} y={gy} w={gw} h={gh} style={{transform: `translateX(${(1 - s) * -80}px)`, opacity: Math.min(1, s * 1.6)}}>
         <div style={{position: "relative", padding: "22px 34px 26px 46px"}}>
           <div style={{
             position: "absolute", left: 22, top: 22, bottom: 26, width: 6, borderRadius: 3,
@@ -264,12 +278,12 @@ const Lower: React.FC<any> = ({o, dur}) => {
             boxShadow: `0 0 16px rgba(var(--a),.6)`,
           }} />
           <Reveal delay={2}>
-            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 23, letterSpacing: 4, color: C.orange}}>{badge}</div>
+            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 23, lineHeight: "28px", letterSpacing: 4, color: C.orange}}>{badge}</div>
           </Reveal>
           <div style={{height: 8}} />
           {lines.map((l, i) => (
             <Reveal key={i} delay={6 + i * 4}>
-              <div style={{fontWeight: 800, fontSize: size, color: C.cream, lineHeight: 1.22}}>
+              <div style={{fontWeight: 800, fontSize: size, color: C.cream, lineHeight: `${lh}px`}}>
                 <MarkedText text={l} delay={14 + i * 4} color={C.orange} ink={C.black} />
               </div>
             </Reveal>
@@ -281,15 +295,77 @@ const Lower: React.FC<any> = ({o, dur}) => {
   );
 };
 
+const Stat: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const Z = ZONE(isLand);
+  const valueRaw = up(o.value || o.text || (Array.isArray(o.lines) ? o.lines[0] : "") || "");
+  const labelRaw = up(o.label || "");
+  const vLines = wrapLines([valueRaw], isLand ? 22 : 14).slice(0, 3).map((l) => l.replace(/^\*/, ""));
+  const lLines = labelRaw ? wrapLines([labelRaw], isLand ? 40 : 24).slice(0, 2).map((l) => l.replace(/^\*/, "")) : [];
+  const maxW = isLand ? 1400 : 860;
+  const longest = Math.max(...vLines.map((l) => l.length), 3);
+  const vSize = Math.round(Math.max(54, Math.min(isLand ? 150 : 168, maxW / (longest * 0.72))));
+  const vLh = Math.round(vSize * 1.18);
+  const lSize = isLand ? 32 : 34;
+  const lLh = Math.round(lSize * 1.4);
+  const bgOp = interpolate(f, [0, 10], [0, 1], clamp);
+  const bar = Math.min(1, Math.max(0, spring({frame: f - vLines.length * 4 - 6, fps, config: SPR})));
+  const barMax = Math.min(isLand ? 560 : 460, Math.max(180, longest * vSize * 0.4));
+  return (
+    <Scene dur={dur} moving={false}>
+      <div style={{
+        position: "absolute", left: 40, right: 40, top: Z.top, height: Z.bottom - Z.top, opacity: bgOp,
+        background: "radial-gradient(ellipse at center, rgba(8,12,10,0.5) 0%, rgba(8,12,10,0) 70%)",
+      }} />
+      <div style={{
+        position: "absolute", left: 60, right: 60, top: Z.top, height: Z.bottom - Z.top,
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      }}>
+        {vLines.map((l, i) => (
+          <Reveal key={i} delay={i * 4} style={{textAlign: "center", maxWidth: width - 140}}>
+            <div style={{
+              fontFamily: F_SERIF, fontStyle: "italic", fontWeight: 700, fontSize: vSize, lineHeight: `${vLh}px`,
+              color: C.cream, textAlign: "center", padding: "6px 0",
+              textShadow: "0 2px 4px rgba(0,0,0,0.45), 0 8px 32px rgba(0,0,0,0.5)",
+            } as any}>{l}</div>
+          </Reveal>
+        ))}
+        <div style={{
+          marginTop: 22, height: 4, borderRadius: 2,
+          background: `linear-gradient(90deg, transparent, ${C.orange}, transparent)`,
+          width: barMax * bar,
+        }} />
+        {lLines.length ? (
+          <div style={{marginTop: 22, textAlign: "center", maxWidth: width - 180}}>
+            {lLines.map((l, i) => (
+              <Reveal key={i} delay={vLines.length * 4 + 6 + i * 4} style={{textAlign: "center"}}>
+                <div style={{
+                  fontFamily: F_COND, fontWeight: 700, fontSize: lSize, lineHeight: `${lLh}px`, letterSpacing: 3,
+                  color: C.cream, opacity: 0.94, textAlign: "center",
+                  textShadow: "0 1px 3px rgba(0,0,0,0.6), 0 4px 18px rgba(0,0,0,0.4)",
+                } as any}>{l}</div>
+              </Reveal>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </Scene>
+  );
+};
+
 const List: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
   const {fps, width, height} = useVideoConfig();
   const isLand = width > height;
-  const items: any[] = o.items || [];
+  const items: any[] = (o.items || []).slice(0, 4);
   const n = Math.max(items.length, 1);
-  const h = Math.min(isLand ? 480 : 520, 115 + 96 * n);
-  const top = isLand ? Math.round((height - h) / 2) - 40 : 1040 - h;
+  const ROW = 54, GAP = 20, HEAD = 58;
+  const h = 24 + HEAD + n * ROW + (n - 1) * GAP + 24;
+  const top = Math.round(zoneMid(isLand) - h / 2);
   const gx = isLand ? 310 : 60;
   const gw = isLand ? 1300 : 960;
   const p = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
@@ -300,24 +376,24 @@ const List: React.FC<any> = ({o, dur}) => {
         <Glass o={o} x={gx} y={top} w={gw} h={h} style={{transform: `translateY(${(1 - p) * 60}px)`, opacity: Math.min(1, p * 1.5)}}>
           <div style={{position: "absolute", left: 30, top: 24, bottom: 24, right: 34}}>
             <div style={{
-              position: "absolute", left: 0, top: 2, height: 34, width: 6, borderRadius: 3,
+              position: "absolute", left: 0, top: 2, height: 30, width: 6, borderRadius: 3,
               background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.3))`,
               boxShadow: "0 0 14px rgba(var(--a),.6)",
             }} />
-            <div style={{paddingLeft: 22, paddingBottom: 12, borderBottom: "1px solid rgba(255,255,255,0.14)"}}>
+            <div style={{paddingLeft: 22, height: 44, boxSizing: "border-box", paddingBottom: 12, borderBottom: "1px solid rgba(255,255,255,0.14)"}}>
               <Reveal delay={2}>
-                <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 26, letterSpacing: 4, color: C.orange, lineHeight: 1.2}}>
+                <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 24, letterSpacing: 4, color: C.orange, lineHeight: "30px", whiteSpace: "nowrap"}}>
                   {up(o.title || "RINGKASAN FAKTA")}
                 </div>
               </Reveal>
             </div>
-            <div style={{display: "flex", flexDirection: "column", justifyContent: "space-evenly", position: "absolute", left: 0, right: 0, top: 58, bottom: 0}}>
+            <div style={{position: "absolute", left: 0, right: 0, top: HEAD, display: "flex", flexDirection: "column", gap: GAP}}>
               {items.map((it, i) => {
                 const st = Math.round((it._t || i * 0.45) * fps);
                 const q = Math.min(1, Math.max(0, spring({frame: f - st, fps, config: SPR})));
                 const txt = up(it.text);
                 return (
-                  <div key={i} style={{display: "flex", alignItems: "center", gap: 20}}>
+                  <div key={i} style={{display: "flex", alignItems: "center", gap: 20, height: ROW}}>
                     <div style={{
                       minWidth: 42, height: 42, borderRadius: 12, background: C.orange, color: C.black,
                       display: "flex", alignItems: "center", justifyContent: "center",
@@ -325,7 +401,7 @@ const List: React.FC<any> = ({o, dur}) => {
                       transform: `scale(${q})`, boxShadow: "0 4px 14px rgba(var(--a),.5)",
                     }}>{i + 1}</div>
                     <Reveal delay={st} style={{flex: 1}}>
-                      <div style={{fontWeight: 800, fontSize: fitSize(txt, isLand ? 36 : 40, isLand ? 1080 : 740), color: C.cream, lineHeight: 1.2}}>{txt}</div>
+                      <div style={{fontWeight: 800, fontSize: fitSize(txt, isLand ? 34 : 38, isLand ? 1080 : 760), color: C.cream, lineHeight: 1.25, whiteSpace: "nowrap"}}>{txt}</div>
                     </Reveal>
                   </div>
                 );
@@ -349,6 +425,8 @@ const Solid: React.FC<any> = ({o, dur}) => {
   const lines: string[] = wrapLines(o.lines || [], isLand ? 28 : 18);
   const maxLen = Math.max(...lines.map((l) => l.replace("*", "").length), 1);
   const uw = interpolate(f, [10 + lines.length * 5, 22 + lines.length * 5], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
+  const boxH = isLand ? 500 : 540;
+  const boxTop = Math.round(zoneMid(isLand) - boxH / 2);
   return (
     <Scene dur={dur} moving={false}>
       <AbsoluteFill style={{background: `radial-gradient(circle at 50% 42%, ${C.mid} 0%, ${C.dark} 85%)`, opacity: bg}}>
@@ -370,7 +448,7 @@ const Solid: React.FC<any> = ({o, dur}) => {
           }} />;
         })}
         <div style={{
-          position: "absolute", left: isLand ? 240 : 70, right: isLand ? 240 : 70, top: isLand ? 220 : 420, height: isLand ? 500 : 540, borderRadius: 30,
+          position: "absolute", left: isLand ? 240 : 70, right: isLand ? 240 : 70, top: boxTop, height: boxH, borderRadius: 30,
           background: "rgba(0,0,0,0.38)", border: "1px solid rgba(255,255,255,0.22)",
           boxShadow: "0 30px 80px rgba(0,0,0,0.5)",
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -474,10 +552,11 @@ const Icon: React.FC<any> = ({o, dur}) => {
   const floatY = Math.sin(f * 0.16) * 8;
   const label = up(o.label);
   const cx = width / 2;
-  const cy = isLand ? 410 : 635;
+  const iy = Math.round(zoneMid(isLand) - (isLand ? 520 : 590) / 2);
+  const cy = iy + (isLand ? 200 : 225);
   return (
     <Scene dur={dur} moving={false}>
-      <Glass o={o} x={isLand ? 460 : 90} y={isLand ? 210 : 410} w={isLand ? 1000 : 900} h={isLand ? 520 : 590} radius={34} style={{opacity: pIn, transform: `scale(${0.9 + 0.1 * pIn})`}} />
+      <Glass o={o} x={isLand ? 460 : 90} y={iy} w={isLand ? 1000 : 900} h={isLand ? 520 : 590} radius={34} style={{opacity: pIn, transform: `scale(${0.9 + 0.1 * pIn})`}} />
       <svg width={width} height={height} style={{position: "absolute", left: 0, top: 0}}>
         <g transform={`translate(${cx} ${cy + floatY}) scale(${Math.max(0, pop)})`}>
           <IconArt name={o.icon} draw={draw} f={f} />
@@ -485,7 +564,7 @@ const Icon: React.FC<any> = ({o, dur}) => {
         <circle cx={cx} cy={cy} r={95 + ring * 185} fill="none" stroke={C.orange}
           strokeWidth={6 * (1 - ring) + 1} opacity={(1 - ring) * (f >= 6 ? 1 : 0)} />
       </svg>
-      <div style={{position: "absolute", left: isLand ? 490 : 110, right: isLand ? 490 : 110, top: isLand ? 600 : 836, textAlign: "center"}}>
+      <div style={{position: "absolute", left: isLand ? 490 : 110, right: isLand ? 490 : 110, top: iy + (isLand ? 390 : 426), textAlign: "center"}}>
         <Reveal delay={10}>
           <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 920 : 820), color: C.cream}}>{label}</div>
         </Reveal>
@@ -504,17 +583,18 @@ const QMark: React.FC<any> = ({o, dur}) => {
   const pill = Math.min(1, Math.max(0, spring({frame: f - 8, fps, config: SPR})));
   const label = up(o.label);
   const glow = 26 + Math.sin(f / 4) * 12;
+  const qTop = Math.round(zoneMid(isLand) - (isLand ? 230 : 290));
   return (
     <Scene dur={dur}>
       <div style={{
-        position: "absolute", left: 0, right: 0, top: isLand ? 160 : 330, textAlign: "center",
+        position: "absolute", left: 0, right: 0, top: qTop, textAlign: "center",
         fontFamily: F_SERIF, fontStyle: "italic", fontWeight: 700,
         fontSize: isLand ? 310 : 380, color: C.orange, lineHeight: 1,
         transform: `scale(${Math.max(0, s)}) rotate(${wob}deg)`,
         WebkitTextStroke: `8px ${C.black}`, paintOrder: "stroke fill",
         textShadow: `0 0 ${glow}px rgba(var(--a),.7)`,
       } as any}>?</div>
-      <Glass o={o} x={isLand ? 360 : 90} y={isLand ? 540 : 800} w={isLand ? 1200 : 900} radius={44} style={{opacity: pill, transform: `translateY(${(1 - pill) * 40}px)`}}>
+      <Glass o={o} x={isLand ? 360 : 90} y={qTop + (isLand ? 380 : 470)} w={isLand ? 1200 : 900} radius={44} style={{opacity: pill, transform: `translateY(${(1 - pill) * 40}px)`}}>
         <div style={{padding: "14px 40px 18px", textAlign: "center"}}>
           <Reveal delay={8}>
             <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 1100 : 800), color: C.cream, lineHeight: 1.25}}>{label}</div>
@@ -525,201 +605,14 @@ const QMark: React.FC<any> = ({o, dur}) => {
   );
 };
 
-let GEO_PROMISE: Promise<any> | null = null;
-const loadGeo = (): Promise<any> => {
-  if (GEO_PROMISE) return GEO_PROMISE;
-  GEO_PROMISE = fetch(staticFile("indonesia-prov.geojson"))
-    .then((r) => (r.ok ? r.json() : null))
-    .then((p: any) => ({prov: p && Array.isArray(p.features) ? p.features : []}))
-    .catch(() => ({prov: []}));
-  return GEO_PROMISE;
-};
-
-const useGeo = () => {
-  const [geo, setGeo] = useState<any>(null);
-  const [handle] = useState(() => delayRender("geo", {timeoutInMilliseconds: 60000}));
-  useEffect(() => {
-    let alive = true;
-    loadGeo().then((g) => { if (alive) setGeo(g); }).finally(() => continueRender(handle));
-    return () => { alive = false; };
-  }, [handle]);
-  return geo;
-};
-
-const MapView: React.FC<any> = ({o, dur}) => {
-  const C = useC();
-  const f = useCurrentFrame();
-  const {fps, width, height} = useVideoConfig();
+const MapToText: React.FC<any> = ({o, dur}) => {
+  const {width, height} = useVideoConfig();
   const isLand = width > height;
-  const MAP_W = isLand ? 1160 : 860;
-  const MAP_H = isLand ? 520 : 560;
-  const geo = useGeo();
-  const pin: [number, number] = Array.isArray(o.pin) && o.pin.length === 2 ? [Number(o.pin[0]), Number(o.pin[1])] : [106.25, -6.62];
-  const pinKey = pin.join(",");
-
-  const base: any = useMemo(() => {
-    const p: any = geoMercator();
-    const feats = geo && geo.prov ? geo.prov : [];
-    if (feats.length) p.fitExtent([[28, 28], [MAP_W - 28, MAP_H - 28]], {type: "FeatureCollection", features: feats} as any);
-    else p.center([118, -2]).scale(980).translate([MAP_W / 2, MAP_H / 2]);
-    return p;
-  }, [geo, MAP_W, MAP_H]);
-
-  const built = useMemo(() => {
-    const gp: any = geoPath(base);
-    if (gp.digits) gp.digits(1);
-    const feats = geo && geo.prov ? geo.prov : [];
-    const shapes = feats.map((ft: any) => {
-      let hit = false;
-      try { hit = geoContains(ft, pin); } catch (e) { hit = false; }
-      let bb: any = [[0, 0], [1, 1]];
-      try { bb = gp.bounds(ft); } catch (e) { bb = [[0, 0], [1, 1]]; }
-      return {d: gp(ft) || "", hit, bb};
-    });
-    let grat = "";
-    try { grat = gp(geoGraticule().step([5, 5])()) || ""; } catch (e) { grat = ""; }
-    return {shapes, grat};
-  }, [geo, base, pinKey]);
-
-  const P: any = base(pin) || [MAP_W / 2, MAP_H / 2];
-  const C0: any = [MAP_W / 2, MAP_H / 2];
-  const hitS: any = built.shapes.find((s: any) => s.hit);
-  let k1 = o.zoom ? Number(o.zoom) / 5 : 6;
-  if (hitS) {
-    const bw = Math.max(1, hitS.bb[1][0] - hitS.bb[0][0]);
-    const bh = Math.max(1, hitS.bb[1][1] - hitS.bb[0][1]);
-    k1 = Math.min((MAP_W * 0.62) / bw, (MAP_H * 0.62) / bh);
-  }
-  k1 = Math.max(2, Math.min(16, k1));
-
-  const flyEnd = Math.max(24, Math.round(dur * 0.6));
-  const w = interpolate(f, [6, flyEnd], [0, 1], {...clamp, easing: Easing.inOut(Easing.cubic)});
-  const wc = 1 - Math.pow(1 - w, 2);
-  const k = Math.exp(w * Math.log(k1) - 0.22 * Math.sin(Math.PI * w));
-  const cx = C0[0] + (P[0] - C0[0]) * wc;
-  const cy = C0[1] + (P[1] - C0[1]) * wc;
-  const tx = MAP_W / 2 + (MAP_W * 0.42 - MAP_W / 2) * w;
-  const ty = MAP_H / 2 + (MAP_H * 0.60 - MAP_H / 2) * w;
-  const sx = tx + (P[0] - cx) * k;
-  const sy = ty + (P[1] - cy) * k;
-
-  const arrive = flyEnd;
-  const pinOp = interpolate(f, [arrive - 10, arrive], [0, 1], clamp);
-  const hitPulse = 0.22 + 0.08 * Math.sin(f / 5);
-
-  const labelTxt = up(o.label);
-  const labelLines = wrapLines([labelTxt], 13).slice(0, 2).map((l) => l.replace(/^\*/, ""));
-  const subLines = o.sub ? wrapLines([titleCase(o.sub)], 24).slice(0, 2).map((l) => l.replace(/^\*/, "")) : [];
-  const boxW = 330;
-  const boxH = 26 + labelLines.length * 40 + (subLines.length ? 10 + subLines.length * 33 : 0) + 22;
-  const L = 64, M = 16;
-  const dirs: any[] = [[1, -1], [-1, -1], [1, 1], [-1, 1]];
-  let pick: any = null;
-  for (const [dx, dy] of dirs) {
-    const ex = sx + dx * L, ey = sy + dy * L;
-    const bx = dx > 0 ? ex : ex - boxW;
-    const by = ey - boxH / 2;
-    if (bx >= M && bx + boxW <= MAP_W - M && by >= M && by + boxH <= MAP_H - M) { pick = {dx, dy, ex, ey, bx, by}; break; }
-  }
-  if (!pick) {
-    const dx = sx < MAP_W / 2 ? 1 : -1, dy = sy < MAP_H / 2 ? 1 : -1;
-    const ex = sx + dx * L, ey = sy + dy * L;
-    const bx0 = dx > 0 ? ex : ex - boxW;
-    pick = {dx, dy, ex, ey,
-      bx: Math.max(M, Math.min(MAP_W - M - boxW, bx0)),
-      by: Math.max(M, Math.min(MAP_H - M - boxH, ey - boxH / 2))};
-  }
-  const lp = interpolate(f, [arrive, arrive + 10], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
-  const bp = Math.min(1, Math.max(0, spring({frame: f - arrive - 6, fps, config: SPR})));
-  const coord = `${Math.abs(pin[1]).toFixed(2)}°${pin[1] < 0 ? "S" : "N"}  ${Math.abs(pin[0]).toFixed(2)}°${pin[0] < 0 ? "W" : "E"}`;
-  const cardIn = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
-  const lineLen = Math.sqrt(2) * L;
-
-  return (
-    <>
-      <Dim dur={dur} />
-      <Scene dur={dur} moving={false}>
-        <Glass o={o} x={isLand ? 340 : 70} y={isLand ? 160 : 330} w={isLand ? 1240 : 940} h={isLand ? 650 : 690} radius={30} style={{opacity: cardIn, transform: `translateY(${(1 - cardIn) * 50}px)`}}>
-          <div style={{position: "absolute", left: 40, right: 40, top: 22, height: 48, display: "flex", alignItems: "center", justifyContent: "space-between"}}>
-            <div style={{display: "flex", alignItems: "center", gap: 12}}>
-              <div style={{width: 12, height: 12, borderRadius: 6, background: C.orange, boxShadow: `0 0 12px ${C.orange}`}} />
-              <Reveal delay={2}><div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 28, letterSpacing: 5, color: C.orange}}>LOKASI</div></Reveal>
-            </div>
-            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 26, letterSpacing: 2, color: C.cream, opacity: pinOp}}>{coord}</div>
-          </div>
-          <div style={{position: "absolute", left: 40, top: 84, width: MAP_W, height: MAP_H, borderRadius: 18, overflow: "hidden", background: C.dark, border: "1px solid rgba(255,255,255,0.16)"}}>
-            <svg width={MAP_W} height={MAP_H} viewBox={`0 0 ${MAP_W} ${MAP_H}`} style={{position: "absolute", left: 0, top: 0}}>
-              <defs>
-                <radialGradient id="sea" cx="50%" cy="50%" r="80%">
-                  <stop offset="0%" stopColor={C.mid} stopOpacity={0.35} />
-                  <stop offset="100%" stopColor={C.dark} stopOpacity={1} />
-                </radialGradient>
-                <radialGradient id="mvg" cx="50%" cy="50%" r="75%">
-                  <stop offset="55%" stopColor="#000" stopOpacity={0} />
-                  <stop offset="100%" stopColor="#000" stopOpacity={0.55} />
-                </radialGradient>
-              </defs>
-              <rect width={MAP_W} height={MAP_H} fill="url(#sea)" />
-              <g transform={`translate(${tx} ${ty}) scale(${k}) translate(${-cx} ${-cy})`}>
-                {built.grat ? (
-                  <path d={built.grat} fill="none" stroke={C.cream} strokeOpacity={0.09} strokeWidth={1} vectorEffect="non-scaling-stroke" />
-                ) : null}
-                {built.shapes.map((s: any, i: number) => (
-                  <path key={"h" + i} d={s.d} fill="none" stroke={C.cream} strokeOpacity={0.1} strokeWidth={7}
-                    strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-                ))}
-                {built.shapes.map((s: any, i: number) => (
-                  <path key={"p" + i} d={s.d}
-                    fill={s.hit ? C.orange : C.mid} fillOpacity={s.hit ? hitPulse + 0.12 : 0.92}
-                    stroke={s.hit ? C.orange : C.cream} strokeOpacity={s.hit ? 1 : 0.42}
-                    strokeWidth={s.hit ? 2.4 : 0.9} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-                ))}
-              </g>
-              <rect width={MAP_W} height={MAP_H} fill="url(#mvg)" />
-              <g opacity={pinOp}>
-                {[0, 1, 2].map((i) => {
-                  const q = ((f + i * 12) % 36) / 36;
-                  return <circle key={i} cx={sx} cy={sy} r={10 + q * 62} fill="none" stroke={C.orange} strokeWidth={3} opacity={(1 - q) * 0.95} />;
-                })}
-                <circle cx={sx} cy={sy} r={9} fill={C.orange} stroke={C.cream} strokeWidth={3} />
-              </g>
-              <g opacity={pinOp > 0 ? 1 : 0}>
-                <line x1={sx + pick.dx * 12} y1={sy + pick.dy * 12} x2={pick.ex} y2={pick.ey}
-                  stroke={C.cream} strokeWidth={3} strokeLinecap="round"
-                  strokeDasharray={lineLen} strokeDashoffset={lineLen * (1 - lp)} />
-                <circle cx={pick.ex} cy={pick.ey} r={6 * lp} fill={C.orange} stroke={C.cream} strokeWidth={2} />
-              </g>
-              <g stroke={C.orange} strokeWidth={4} fill="none" opacity={0.9}>
-                <path d="M 14 44 L 14 14 L 44 14" /><path d={`M ${MAP_W - 44} 14 L ${MAP_W - 14} 14 L ${MAP_W - 14} 44`} />
-                <path d={`M 14 ${MAP_H - 44} L 14 ${MAP_H - 14} L 44 ${MAP_H - 14}`} />
-                <path d={`M ${MAP_W - 14} ${MAP_H - 44} L ${MAP_W - 14} ${MAP_H - 14} L ${MAP_W - 44} ${MAP_H - 14}`} />
-              </g>
-            </svg>
-            <div style={{
-              position: "absolute", left: pick.bx, top: pick.by, width: boxW, height: boxH, boxSizing: "border-box",
-              borderRadius: 14, background: "rgba(8,12,10,0.80)", border: "1px solid rgba(255,255,255,0.24)",
-              borderLeft: `6px solid ${C.orange}`, boxShadow: "0 14px 34px rgba(0,0,0,0.5)",
-              padding: "13px 18px 11px 18px", opacity: bp > 0 ? 1 : 0,
-              clipPath: pick.dx > 0 ? `inset(0 ${(1 - bp) * 100}% 0 0)` : `inset(0 0 0 ${(1 - bp) * 100}%)`,
-            } as any}>
-              {labelLines.map((l, i) => (
-                <div key={i} style={{fontFamily: F_DISPLAY, fontWeight: 800, fontSize: 32, lineHeight: "40px", color: C.cream, whiteSpace: "nowrap"}}>
-                  {i === 0 && labelLines.length === 1 ? <MarkedText text={l} delay={arrive + 10} color={C.orange} ink={C.black} /> : l}
-                </div>
-              ))}
-              {subLines.length ? (
-                <div style={{marginTop: 10}}>
-                  {subLines.map((l, i) => (
-                    <div key={i} style={{fontFamily: F_SERIF, fontStyle: "italic", fontWeight: 700, fontSize: 26, lineHeight: "33px", color: C.orange, whiteSpace: "nowrap"}}>{l}</div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </Glass>
-      </Scene>
-    </>
-  );
+  const t = clipWords(up(o.label || o.sub || o.text || ""), isLand ? 76 : 40);
+  if (!t) return null;
+  const nWords = t.split(/\s+/).filter(Boolean).length;
+  if (nWords <= 3 && t.length <= 24) return <Big o={{...o, lines: [t]}} dur={dur} />;
+  return <Lower o={{...o, text: t, badge: undefined}} dur={dur} />;
 };
 
 const Caps: React.FC<any> = ({cue, dur, fps}) => {
@@ -730,32 +623,28 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
   const out = interpolate(f, [dur - 4, dur], [1, 0], clamp);
   const inn = interpolate(f, [0, 4], [0, 1], clamp);
   const longest = Math.max(...cue.lines.map((ln: any[]) => ln.map((x: any) => x.w).join(" ").length), 1);
-  const fs = Math.max(isLand ? 30 : 34, Math.min(isLand ? 44 : 56, (isLand ? 1400 : 840) / (longest * 0.68)));
+  const fs = Math.max(isLand ? 28 : 32, Math.min(isLand ? 40 : 50, (isLand ? 1400 : 840) / (longest * 0.66)));
+  const lh = Math.round(fs * 1.3);
   return (
     <AbsoluteFill style={{fontFamily: F_DISPLAY, opacity: out * inn}}>
-      <div style={{position: "absolute", left: "8%", width: "84%", bottom: isLand ? "7%" : "24%", display: "flex", justifyContent: "center"}}>
+      <div style={{position: "absolute", left: "8%", width: "84%", bottom: height - ZONE(isLand).sub, display: "flex", justifyContent: "center"}}>
         <div style={{
-          maxWidth: "100%", boxSizing: "border-box", padding: "12px 28px 16px", borderRadius: 24,
-          background: "rgba(8,10,9,0.68)", border: "1px solid rgba(255,255,255,0.14)",
-          boxShadow: "0 12px 34px rgba(0,0,0,0.45)",
-          display: "flex", flexDirection: "column", alignItems: "center", gap: 4, textAlign: "center",
+          maxWidth: "100%", boxSizing: "border-box",
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 2, textAlign: "center",
         }}>
           {cue.lines.map((ln: any[], li: number) => (
-            <div key={li} style={{display: "flex", justifyContent: "center", gap: fs * 0.3, whiteSpace: "nowrap"}}>
+            <div key={li} style={{display: "flex", justifyContent: "center", gap: fs * 0.28, whiteSpace: "nowrap"}}>
               {ln.map((wd: any, wi: number) => {
                 const st = Math.round((wd.t0 - cue.s) * fps);
-                const en = Math.round((wd.t1 - cue.s) * fps);
-                const sp = spring({frame: f - st, fps, config: {damping: 12, stiffness: 230, mass: 0.5}});
-                const live = f >= st && f < en;
-                const sc = interpolate(Math.min(sp, 1.15), [0, 1], [0.6, 1]) * (wd.kw ? 1.05 : 1) * (live ? 1.03 : 1);
-                const rise = (1 - Math.min(sp, 1)) * 18;
+                const sp = spring({frame: f - st, fps, config: {damping: 18, stiffness: 190, mass: 0.6}});
+                const pp = Math.min(1, Math.max(0, sp));
                 return (
                   <div key={wi} style={{
-                    fontWeight: 800, fontSize: fs, lineHeight: 1.25,
+                    fontWeight: 600, fontSize: fs, lineHeight: `${lh}px`,
                     color: wd.kw ? C.orange : "#FFFFFF",
-                    opacity: f >= st ? Math.min(1, sp * 2.5) : 0,
-                    transform: `translateY(${rise}px) scale(${sc})`,
-                    textShadow: wd.kw ? "0 0 22px rgba(var(--a),.6)" : "0 2px 8px rgba(0,0,0,0.5)",
+                    opacity: f >= st ? Math.min(1, pp * 2.2) : 0,
+                    transform: `translateY(${(1 - pp) * 8}px)`,
+                    textShadow: SUB_SHADOW,
                   } as any}>{wd.w}</div>
                 );
               })}
@@ -768,8 +657,8 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
 };
 
 const REG: any = {
-  big: Big, lower: Lower, list: List, quote: List, solid: Solid,
-  icon: Icon, qmark: QMark, map: MapView,
+  big: Big, lower: Lower, stat: Stat, list: List, quote: List, solid: Solid,
+  icon: Icon, qmark: QMark, map: MapToText,
 };
 
 export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], captions = [], theme = null, glassSrc = null}) => {
@@ -817,33 +706,5 @@ def prepare_remotion_project(remo_dir: str = "/tmp/remotion_overlay"):
 
 
 def download_geo_assets(remo_dir: str = "/tmp/remotion_overlay"):
-    def _dl(urls, dest, check, label):
-        if os.path.exists(dest) and os.path.getsize(dest) > 100:
-            return True
-        for u in urls:
-            for attempt in range(1, 4):
-                try:
-                    data = urllib.request.urlopen(u, timeout=60).read()
-                    obj = json.loads(data)
-                    if not check(obj):
-                        raise ValueError("struktur JSON tidak sesuai")
-                    with open(dest, "wb") as fh:
-                        fh.write(data)
-                    print(f"[peta] {label} OK dari {u}")
-                    return True
-                except Exception as e:
-                    print(f"[peta] {label} gagal ({u}, percobaan {attempt}): {e}")
-                    time.sleep(1.5 * attempt)
-        return False
-
-    _dl(
-        [
-            f"https://raw.githubusercontent.com/ans-4175/peta-indonesia-geojson/{br}/indonesia-prov.geojson"
-            for br in ("master", "main")
-        ] + [
-            "https://cdn.jsdelivr.net/gh/ans-4175/peta-indonesia-geojson@master/indonesia-prov.geojson",
-        ],
-        f"{remo_dir}/public/indonesia-prov.geojson",
-        lambda o: isinstance(o.get("features"), list) and len(o["features"]) > 0,
-        "peta provinsi",
-    )
+    """Dipertahankan hanya agar impor lama tidak error. Peta sudah dihapus."""
+    return None
