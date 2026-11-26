@@ -3,6 +3,10 @@ import json
 import time
 import urllib.request
 
+IS_LONG = os.environ.get("VIDEO_MODE", "").strip().upper() == "LONG"
+OUT_W = 1920 if IS_LONG else 1080
+OUT_H = 1080 if IS_LONG else 1920
+
 REMO_FILES = {
     "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","d3-geo":"3.1.1","@remotion/google-fonts":"4.0.352"}}""",
     "tsconfig.json": r"""{"compilerOptions":{"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":false,"skipLibCheck":true,"esModuleInterop":true,"noEmit":true},"include":["src"]}""",
@@ -10,26 +14,26 @@ REMO_FILES = {
 import {Root} from "./Root";
 registerRoot(Root);
 """,
-    "src/Root.tsx": r"""import React from "react";
-import {Composition} from "remotion";
-import {Overlay} from "./Overlay";
-export const Root: React.FC = () => {
+    "src/Root.tsx": f"""import React from "react";
+import {{Composition}} from "remotion";
+import {{Overlay}} from "./Overlay";
+export const Root: React.FC = () => {{
   return (
     <Composition
       id="Overlay"
-      component={Overlay as any}
-      width={1080}
-      height={1920}
-      fps={30}
-      durationInFrames={300}
-      defaultProps={{overlays: [], fps: 30, images: [], durationInFrames: 300}}
-      calculateMetadata={({props}: any) => ({
+      component={{Overlay as any}}
+      width={{{OUT_W}}}
+      height={{{OUT_H}}}
+      fps={{30}}
+      durationInFrames={{300}}
+      defaultProps={{{{overlays: [], fps: 30, images: [], durationInFrames: 300}}}}
+      calculateMetadata={{({{props}}: any) => ({{
         durationInFrames: props.durationInFrames,
         fps: props.fps,
-      })}
+      }})}}
     />
   );
-};
+}};
 """,
     "src/Overlay.tsx": r"""import React, {createContext, useContext, useEffect, useMemo, useState} from "react";
 import {
@@ -91,8 +95,6 @@ const wrapLines = (rawLines: string[], maxChars = 18): string[] => {
   return out.slice(0, 4);
 };
 
-/* ---------- Primitif animasi ---------- */
-
 const Scene: React.FC<any> = ({dur, children, moving = true}) => {
   const f = useCurrentFrame();
   const out = interpolate(f, [dur - 7, dur], [1, 0], clamp);
@@ -104,7 +106,6 @@ const Scene: React.FC<any> = ({dur, children, moving = true}) => {
   );
 };
 
-// Masked line reveal: teks naik dari balik topeng overflow:hidden.
 const Reveal: React.FC<any> = ({delay = 0, children, style = {}, pad = "0.16em"}) => {
   const f = useCurrentFrame();
   const {fps} = useVideoConfig();
@@ -116,7 +117,6 @@ const Reveal: React.FC<any> = ({delay = 0, children, style = {}, pad = "0.16em"}
   );
 };
 
-// Sapuan highlighter marker di belakang kata kunci.
 const Mark: React.FC<any> = ({delay = 0, color, alpha = 0.96, children}) => {
   const f = useCurrentFrame();
   const w = interpolate(f, [delay, delay + 10], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
@@ -132,7 +132,6 @@ const Mark: React.FC<any> = ({delay = 0, color, alpha = 0.96, children}) => {
   );
 };
 
-// Teks dengan satu kata kunci diberi marker.
 const MarkedText: React.FC<any> = ({text, delay = 6, color, ink}) => {
   const key = keyWord(text);
   const idx = key ? text.lastIndexOf(key) : -1;
@@ -146,7 +145,6 @@ const MarkedText: React.FC<any> = ({text, delay = 6, color, ink}) => {
   );
 };
 
-// Dimming vignette lembut (khusus saat kartu list / map tampil).
 const Dim: React.FC<any> = ({dur}) => {
   const f = useCurrentFrame();
   const a = Math.min(interpolate(f, [0, 8], [0, 1], clamp), interpolate(f, [dur - 8, dur], [1, 0], clamp));
@@ -158,11 +156,9 @@ const Dim: React.FC<any> = ({dur}) => {
   );
 };
 
-// Kartu glassmorphism. Blur sungguhan memakai salinan buram video dasar (glassSrc);
-// jika tidak tersedia, kartu tetap semi-transparan gelap.
 const Glass: React.FC<any> = ({o, x, y, w, h, radius = 26, style = {}, children}) => {
   const {glass} = useContext(CfgCtx);
-  const {fps} = useVideoConfig();
+  const {fps, width, height} = useVideoConfig();
   const from = Math.round(((o && o.t0) || 0) * fps);
   return (
     <div style={{
@@ -175,8 +171,8 @@ const Glass: React.FC<any> = ({o, x, y, w, h, radius = 26, style = {}, children}
       ...style,
     } as any}>
       {glass ? (
-        <div style={{position: "absolute", left: -x, top: -y, width: 1080, height: 1920}}>
-          <OffthreadVideo src={staticFile(glass)} startFrom={from} style={{width: 1080, height: 1920, objectFit: "cover"}} />
+        <div style={{position: "absolute", left: -x, top: -y, width, height}}>
+          <OffthreadVideo src={staticFile(glass)} startFrom={from} style={{width, height, objectFit: "cover"}} />
         </div>
       ) : null}
       <div style={{position: "absolute", left: 0, top: 0, right: 0, bottom: 0, background: "linear-gradient(145deg, rgba(var(--d),.50) 0%, rgba(8,12,10,.60) 100%)"}} />
@@ -186,36 +182,38 @@ const Glass: React.FC<any> = ({o, x, y, w, h, radius = 26, style = {}, children}
   );
 };
 
-/* ---------- Big: judul tegas + kalimat pembanding serif ---------- */
-
 const Big: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
-  const lines: string[] = wrapLines(o.lines || [], 16);
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const lines: string[] = wrapLines(o.lines || [], isLand ? 28 : 16);
   const starIdx = lines.findIndex((l) => l.startsWith("*"));
   const accentIdx = starIdx >= 0 ? starIdx : (lines.length > 1 ? lines.length - 1 : -1);
   const sBar = Math.min(1, spring({frame: f - lines.length * 4 - 4, fps, config: SPR}));
   const bgOp = interpolate(f, [0, 8], [0, 1], clamp);
+  const boxTop = isLand ? 160 : 330;
+  const boxH = isLand ? 560 : 700;
+  const maxW = isLand ? 1560 : 860;
   return (
     <Scene dur={dur}>
       <div style={{
-        position: "absolute", left: 40, right: 40, top: 330, height: 700, opacity: bgOp,
+        position: "absolute", left: 40, right: 40, top: boxTop, height: boxH, opacity: bgOp,
         background: "radial-gradient(ellipse at center, rgba(8,12,10,0.66) 0%, rgba(8,12,10,0) 72%)",
       }} />
       <div style={{
-        position: "absolute", left: 60, right: 60, top: 330, height: 700,
+        position: "absolute", left: 60, right: 60, top: boxTop, height: boxH,
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
       }}>
         {lines.map((raw, i) => {
           const l = raw.replace(/^\*/, "");
           const accent = i === accentIdx;
           const size = accent
-            ? Math.min(104, Math.max(46, 860 / (Math.max(l.length, 4) * 0.6)))
-            : Math.min(112, Math.max(46, 860 / (Math.max(l.length, 4) * 0.8)));
+            ? Math.min(isLand ? 92 : 104, Math.max(44, maxW / (Math.max(l.length, 4) * 0.6)))
+            : Math.min(isLand ? 98 : 112, Math.max(44, maxW / (Math.max(l.length, 4) * 0.8)));
           const single = lines.length === 1;
           return (
-            <Reveal key={i} delay={i * 4} style={{textAlign: "center", maxWidth: 940}}>
+            <Reveal key={i} delay={i * 4} style={{textAlign: "center", maxWidth: width - 140}}>
               <div style={{
                 fontFamily: accent ? F_SERIF : F_DISPLAY, fontStyle: accent ? "italic" : "normal",
                 fontWeight: accent ? 700 : 800, fontSize: size, lineHeight: 1.12,
@@ -236,37 +234,39 @@ const Big: React.FC<any> = ({o, dur}) => {
         <div style={{
           marginTop: 26, height: 6, borderRadius: 3,
           background: `linear-gradient(90deg, transparent, ${C.orange}, ${C.cream}, transparent)`,
-          width: 560 * sBar,
+          width: (isLand ? 760 : 560) * sBar,
         }} />
       </div>
     </Scene>
   );
 };
 
-/* ---------- Lower: kartu kaca dengan garis aksen vertikal ---------- */
-
 const Lower: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
   const s = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
   const prog = interpolate(f, [0, dur], [0, 100], clamp);
   const badge = up(o.badge || "SOROTAN FAKTA");
-  const lines = wrapLines([up(o.text)], 22).slice(0, 2).map((l) => l.replace(/^\*/, ""));
-  const size = fitSize(lines.reduce((a, b) => (a.length >= b.length ? a : b), ""), 44, 820);
+  const lines = wrapLines([up(o.text)], isLand ? 42 : 22).slice(0, 2).map((l) => l.replace(/^\*/, ""));
+  const size = fitSize(lines.reduce((a, b) => (a.length >= b.length ? a : b), ""), isLand ? 38 : 44, isLand ? 1100 : 820);
+  const gx = isLand ? 80 : 60;
+  const gy = isLand ? 680 : 880;
+  const gw = isLand ? 1240 : 960;
   return (
     <Scene dur={dur} moving={false}>
-      <Glass o={o} x={60} y={880} w={960} style={{transform: `translateX(${(1 - s) * -80}px)`, opacity: Math.min(1, s * 1.6)}}>
-        <div style={{position: "relative", padding: "24px 34px 30px 46px"}}>
+      <Glass o={o} x={gx} y={gy} w={gw} style={{transform: `translateX(${(1 - s) * -80}px)`, opacity: Math.min(1, s * 1.6)}}>
+        <div style={{position: "relative", padding: "22px 34px 26px 46px"}}>
           <div style={{
-            position: "absolute", left: 22, top: 24, bottom: 30, width: 6, borderRadius: 3,
+            position: "absolute", left: 22, top: 22, bottom: 26, width: 6, borderRadius: 3,
             background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.25))`,
             boxShadow: `0 0 16px rgba(var(--a),.6)`,
           }} />
           <Reveal delay={2}>
-            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 25, letterSpacing: 4, color: C.orange}}>{badge}</div>
+            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 23, letterSpacing: 4, color: C.orange}}>{badge}</div>
           </Reveal>
-          <div style={{height: 10}} />
+          <div style={{height: 8}} />
           {lines.map((l, i) => (
             <Reveal key={i} delay={6 + i * 4}>
               <div style={{fontWeight: 800, fontSize: size, color: C.cream, lineHeight: 1.22}}>
@@ -281,36 +281,37 @@ const Lower: React.FC<any> = ({o, dur}) => {
   );
 };
 
-/* ---------- List: kartu kaca + item masked reveal ---------- */
-
 const List: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
   const items: any[] = o.items || [];
   const n = Math.max(items.length, 1);
-  const h = Math.min(520, 120 + 104 * n);
-  const top = 1040 - h;
+  const h = Math.min(isLand ? 480 : 520, 115 + 96 * n);
+  const top = isLand ? Math.round((height - h) / 2) - 40 : 1040 - h;
+  const gx = isLand ? 310 : 60;
+  const gw = isLand ? 1300 : 960;
   const p = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
   return (
     <>
       <Dim dur={dur} />
       <Scene dur={dur} moving={false}>
-        <Glass o={o} x={60} y={top} w={960} h={h} style={{transform: `translateY(${(1 - p) * 60}px)`, opacity: Math.min(1, p * 1.5)}}>
-          <div style={{position: "absolute", left: 30, top: 26, bottom: 26, right: 34}}>
+        <Glass o={o} x={gx} y={top} w={gw} h={h} style={{transform: `translateY(${(1 - p) * 60}px)`, opacity: Math.min(1, p * 1.5)}}>
+          <div style={{position: "absolute", left: 30, top: 24, bottom: 24, right: 34}}>
             <div style={{
-              position: "absolute", left: 0, top: 2, height: 36, width: 6, borderRadius: 3,
+              position: "absolute", left: 0, top: 2, height: 34, width: 6, borderRadius: 3,
               background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.3))`,
               boxShadow: "0 0 14px rgba(var(--a),.6)",
             }} />
             <div style={{paddingLeft: 22, paddingBottom: 12, borderBottom: "1px solid rgba(255,255,255,0.14)"}}>
               <Reveal delay={2}>
-                <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 28, letterSpacing: 4, color: C.orange, lineHeight: 1.2}}>
+                <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 26, letterSpacing: 4, color: C.orange, lineHeight: 1.2}}>
                   {up(o.title || "RINGKASAN FAKTA")}
                 </div>
               </Reveal>
             </div>
-            <div style={{display: "flex", flexDirection: "column", justifyContent: "space-evenly", position: "absolute", left: 0, right: 0, top: 62, bottom: 0}}>
+            <div style={{display: "flex", flexDirection: "column", justifyContent: "space-evenly", position: "absolute", left: 0, right: 0, top: 58, bottom: 0}}>
               {items.map((it, i) => {
                 const st = Math.round((it._t || i * 0.45) * fps);
                 const q = Math.min(1, Math.max(0, spring({frame: f - st, fps, config: SPR})));
@@ -318,13 +319,13 @@ const List: React.FC<any> = ({o, dur}) => {
                 return (
                   <div key={i} style={{display: "flex", alignItems: "center", gap: 20}}>
                     <div style={{
-                      minWidth: 44, height: 44, borderRadius: 12, background: C.orange, color: C.black,
+                      minWidth: 42, height: 42, borderRadius: 12, background: C.orange, color: C.black,
                       display: "flex", alignItems: "center", justifyContent: "center",
-                      fontFamily: F_DISPLAY, fontWeight: 800, fontSize: 24,
+                      fontFamily: F_DISPLAY, fontWeight: 800, fontSize: 22,
                       transform: `scale(${q})`, boxShadow: "0 4px 14px rgba(var(--a),.5)",
                     }}>{i + 1}</div>
                     <Reveal delay={st} style={{flex: 1}}>
-                      <div style={{fontWeight: 800, fontSize: fitSize(txt, 40, 740), color: C.cream, lineHeight: 1.2}}>{txt}</div>
+                      <div style={{fontWeight: 800, fontSize: fitSize(txt, isLand ? 36 : 40, isLand ? 1080 : 740), color: C.cream, lineHeight: 1.2}}>{txt}</div>
                     </Reveal>
                   </div>
                 );
@@ -337,15 +338,15 @@ const List: React.FC<any> = ({o, dur}) => {
   );
 };
 
-/* ---------- Solid: layar penuh bertekstur arsip ---------- */
-
 const Solid: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
+  const {width, height} = useVideoConfig();
+  const isLand = width > height;
   const bg = interpolate(f, [0, 6], [0, 1], clamp);
   const gx = (f * 0.6) % 120;
   const gy = (f * 0.4) % 120;
-  const lines: string[] = wrapLines(o.lines || [], 18);
+  const lines: string[] = wrapLines(o.lines || [], isLand ? 28 : 18);
   const maxLen = Math.max(...lines.map((l) => l.replace("*", "").length), 1);
   const uw = interpolate(f, [10 + lines.length * 5, 22 + lines.length * 5], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
   return (
@@ -358,10 +359,10 @@ const Solid: React.FC<any> = ({o, dur}) => {
         }} />
         <AbsoluteFill style={{background: "radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0) 25%, rgba(0,0,0,.78) 100%)"}} />
         {Array.from({length: 24}).map((_, i) => {
-          const x = random("x" + i) * 1080;
-          const y0 = random("y" + i) * 1920;
+          const x = random("x" + i) * width;
+          const y0 = random("y" + i) * height;
           const sp2 = 0.5 + random("s" + i) * 1.4;
-          const y = (((y0 - f * sp2 * 3.5) % 1920) + 1920) % 1920;
+          const y = (((y0 - f * sp2 * 3.5) % height) + height) % height;
           const r = 2 + random("r" + i) * 4;
           return <div key={i} style={{
             position: "absolute", left: x, top: y, width: r * 2, height: r * 2, borderRadius: r,
@@ -369,7 +370,7 @@ const Solid: React.FC<any> = ({o, dur}) => {
           }} />;
         })}
         <div style={{
-          position: "absolute", left: 70, right: 70, top: 420, height: 540, borderRadius: 30,
+          position: "absolute", left: isLand ? 240 : 70, right: isLand ? 240 : 70, top: isLand ? 220 : 420, height: isLand ? 500 : 540, borderRadius: 30,
           background: "rgba(0,0,0,0.38)", border: "1px solid rgba(255,255,255,0.22)",
           boxShadow: "0 30px 80px rgba(0,0,0,0.5)",
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -382,7 +383,7 @@ const Solid: React.FC<any> = ({o, dur}) => {
               <Reveal key={i} delay={6 + i * 5} style={{textAlign: "center"}}>
                 <div style={{
                   fontFamily: accent ? F_SERIF : F_DISPLAY, fontStyle: accent ? "italic" : "normal",
-                  fontWeight: accent ? 700 : 800, fontSize: fitSize(t, accent ? 80 : 74, 820),
+                  fontWeight: accent ? 700 : 800, fontSize: fitSize(t, accent ? 76 : 70, isLand ? 1240 : 820),
                   color: accent ? C.orange : C.cream, lineHeight: 1.25,
                 }}>{t}</div>
               </Reveal>
@@ -391,7 +392,7 @@ const Solid: React.FC<any> = ({o, dur}) => {
           <div style={{
             marginTop: 22, height: 6, borderRadius: 3,
             background: `linear-gradient(90deg, ${C.orange}, ${C.cream})`,
-            width: Math.min(720, maxLen * 48) * uw,
+            width: Math.min(isLand ? 960 : 720, maxLen * 48) * uw,
           }} />
         </div>
       </AbsoluteFill>
@@ -461,42 +462,43 @@ const IconArt: React.FC<any> = ({name, draw, f}) => {
   </g>);
 };
 
-
 const Icon: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
   const pIn = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
   const pop = spring({frame: f - 3, fps, config: {damping: 10, stiffness: 175, mass: 0.7}});
   const draw = interpolate(f, [6, 20], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
   const ring = interpolate(f, [6, 24], [0, 1], clamp);
   const floatY = Math.sin(f * 0.16) * 8;
   const label = up(o.label);
+  const cx = width / 2;
+  const cy = isLand ? 410 : 635;
   return (
     <Scene dur={dur} moving={false}>
-      <Glass o={o} x={90} y={410} w={900} h={590} radius={34} style={{opacity: pIn, transform: `scale(${0.9 + 0.1 * pIn})`}} />
-      <svg width={1080} height={1920} style={{position: "absolute", left: 0, top: 0}}>
-        <g transform={`translate(540 ${635 + floatY}) scale(${Math.max(0, pop)})`}>
+      <Glass o={o} x={isLand ? 460 : 90} y={isLand ? 210 : 410} w={isLand ? 1000 : 900} h={isLand ? 520 : 590} radius={34} style={{opacity: pIn, transform: `scale(${0.9 + 0.1 * pIn})`}} />
+      <svg width={width} height={height} style={{position: "absolute", left: 0, top: 0}}>
+        <g transform={`translate(${cx} ${cy + floatY}) scale(${Math.max(0, pop)})`}>
           <IconArt name={o.icon} draw={draw} f={f} />
         </g>
-        <circle cx={540} cy={635} r={95 + ring * 185} fill="none" stroke={C.orange}
+        <circle cx={cx} cy={cy} r={95 + ring * 185} fill="none" stroke={C.orange}
           strokeWidth={6 * (1 - ring) + 1} opacity={(1 - ring) * (f >= 6 ? 1 : 0)} />
       </svg>
-      <div style={{position: "absolute", left: 110, right: 110, top: 836, textAlign: "center"}}>
+      <div style={{position: "absolute", left: isLand ? 490 : 110, right: isLand ? 490 : 110, top: isLand ? 600 : 836, textAlign: "center"}}>
         <Reveal delay={10}>
-          <div style={{fontWeight: 800, fontSize: fitSize(label, 42, 820), color: C.cream}}>{label}</div>
+          <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 920 : 820), color: C.cream}}>{label}</div>
         </Reveal>
       </div>
     </Scene>
   );
 };
 
-/* ---------- QMark: tanda tanya serif editorial ---------- */
-
 const QMark: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
   const s = spring({frame: f, fps, config: {damping: 9, stiffness: 170, mass: 0.7}});
   const wob = Math.sin(f / 5) * 3 * Math.max(0, 1 - f / 30);
   const pill = Math.min(1, Math.max(0, spring({frame: f - 8, fps, config: SPR})));
@@ -505,28 +507,23 @@ const QMark: React.FC<any> = ({o, dur}) => {
   return (
     <Scene dur={dur}>
       <div style={{
-        position: "absolute", left: 0, right: 0, top: 330, textAlign: "center",
+        position: "absolute", left: 0, right: 0, top: isLand ? 160 : 330, textAlign: "center",
         fontFamily: F_SERIF, fontStyle: "italic", fontWeight: 700,
-        fontSize: 380, color: C.orange, lineHeight: 1,
+        fontSize: isLand ? 310 : 380, color: C.orange, lineHeight: 1,
         transform: `scale(${Math.max(0, s)}) rotate(${wob}deg)`,
         WebkitTextStroke: `8px ${C.black}`, paintOrder: "stroke fill",
         textShadow: `0 0 ${glow}px rgba(var(--a),.7)`,
       } as any}>?</div>
-      <Glass o={o} x={90} y={800} w={900} radius={44} style={{opacity: pill, transform: `translateY(${(1 - pill) * 40}px)`}}>
+      <Glass o={o} x={isLand ? 360 : 90} y={isLand ? 540 : 800} w={isLand ? 1200 : 900} radius={44} style={{opacity: pill, transform: `translateY(${(1 - pill) * 40}px)`}}>
         <div style={{padding: "14px 40px 18px", textAlign: "center"}}>
           <Reveal delay={8}>
-            <div style={{fontWeight: 800, fontSize: fitSize(label, 42, 800), color: C.cream, lineHeight: 1.25}}>{label}</div>
+            <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 1100 : 800), color: C.cream, lineHeight: 1.25}}>{label}</div>
           </Reveal>
         </div>
       </Glass>
     </Scene>
   );
 };
-
-/* ---------- Peta: wilayah Indonesia, camera fly-to, radar, leader line ---------- */
-
-const MAP_W = 860;
-const MAP_H = 560;
 
 let GEO_PROMISE: Promise<any> | null = null;
 const loadGeo = (): Promise<any> => {
@@ -552,7 +549,10 @@ const useGeo = () => {
 const MapView: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
-  const {fps} = useVideoConfig();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const MAP_W = isLand ? 1160 : 860;
+  const MAP_H = isLand ? 520 : 560;
   const geo = useGeo();
   const pin: [number, number] = Array.isArray(o.pin) && o.pin.length === 2 ? [Number(o.pin[0]), Number(o.pin[1])] : [106.25, -6.62];
   const pinKey = pin.join(",");
@@ -563,7 +563,7 @@ const MapView: React.FC<any> = ({o, dur}) => {
     if (feats.length) p.fitExtent([[28, 28], [MAP_W - 28, MAP_H - 28]], {type: "FeatureCollection", features: feats} as any);
     else p.center([118, -2]).scale(980).translate([MAP_W / 2, MAP_H / 2]);
     return p;
-  }, [geo]);
+  }, [geo, MAP_W, MAP_H]);
 
   const built = useMemo(() => {
     const gp: any = geoPath(base);
@@ -607,7 +607,6 @@ const MapView: React.FC<any> = ({o, dur}) => {
   const pinOp = interpolate(f, [arrive - 10, arrive], [0, 1], clamp);
   const hitPulse = 0.22 + 0.08 * Math.sin(f / 5);
 
-  // Callout responsif: arah dipilih agar kotak selalu di dalam bingkai peta.
   const labelTxt = up(o.label);
   const labelLines = wrapLines([labelTxt], 13).slice(0, 2).map((l) => l.replace(/^\*/, ""));
   const subLines = o.sub ? wrapLines([titleCase(o.sub)], 24).slice(0, 2).map((l) => l.replace(/^\*/, "")) : [];
@@ -640,7 +639,7 @@ const MapView: React.FC<any> = ({o, dur}) => {
     <>
       <Dim dur={dur} />
       <Scene dur={dur} moving={false}>
-        <Glass o={o} x={70} y={330} w={940} h={690} radius={30} style={{opacity: cardIn, transform: `translateY(${(1 - cardIn) * 50}px)`}}>
+        <Glass o={o} x={isLand ? 340 : 70} y={isLand ? 160 : 330} w={isLand ? 1240 : 940} h={isLand ? 650 : 690} radius={30} style={{opacity: cardIn, transform: `translateY(${(1 - cardIn) * 50}px)`}}>
           <div style={{position: "absolute", left: 40, right: 40, top: 22, height: 48, display: "flex", alignItems: "center", justifyContent: "space-between"}}>
             <div style={{display: "flex", alignItems: "center", gap: 12}}>
               <div style={{width: 12, height: 12, borderRadius: 6, background: C.orange, boxShadow: `0 0 12px ${C.orange}`}} />
@@ -723,21 +722,21 @@ const MapView: React.FC<any> = ({o, dur}) => {
   );
 };
 
-/* ---------- Subtitle kinetik di safe-zone tengah-bawah ---------- */
-
 const Caps: React.FC<any> = ({cue, dur, fps}) => {
   const C = useC();
   const f = useCurrentFrame();
+  const {width, height} = useVideoConfig();
+  const isLand = width > height;
   const out = interpolate(f, [dur - 4, dur], [1, 0], clamp);
   const inn = interpolate(f, [0, 4], [0, 1], clamp);
   const longest = Math.max(...cue.lines.map((ln: any[]) => ln.map((x: any) => x.w).join(" ").length), 1);
-  const fs = Math.max(34, Math.min(56, 840 / (longest * 0.68)));
+  const fs = Math.max(isLand ? 30 : 34, Math.min(isLand ? 44 : 56, (isLand ? 1400 : 840) / (longest * 0.68)));
   return (
     <AbsoluteFill style={{fontFamily: F_DISPLAY, opacity: out * inn}}>
-      <div style={{position: "absolute", left: "8%", width: "84%", bottom: "24%", display: "flex", justifyContent: "center"}}>
+      <div style={{position: "absolute", left: "8%", width: "84%", bottom: isLand ? "7%" : "24%", display: "flex", justifyContent: "center"}}>
         <div style={{
-          maxWidth: "100%", boxSizing: "border-box", padding: "14px 30px 18px", borderRadius: 26,
-          background: "rgba(8,10,9,0.64)", border: "1px solid rgba(255,255,255,0.14)",
+          maxWidth: "100%", boxSizing: "border-box", padding: "12px 28px 16px", borderRadius: 24,
+          background: "rgba(8,10,9,0.68)", border: "1px solid rgba(255,255,255,0.14)",
           boxShadow: "0 12px 34px rgba(0,0,0,0.45)",
           display: "flex", flexDirection: "column", alignItems: "center", gap: 4, textAlign: "center",
         }}>
