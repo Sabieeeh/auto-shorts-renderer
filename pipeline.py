@@ -21,11 +21,11 @@ H = 1080 if IS_LONG else 1920
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 VID_EXT = (".mov", ".mp4")
-STILL_DUR = 5.0          # durasi klip dari gambar diam (detik)
-STILL_KB_END = 1.08      # Ken Burns gambar: skala akhir (awal = 1.0)
-DRIFT = 0.06             # micro-zoom drift per shot video (1.0 -> 1.06)
-CUT_FRAMES = 6           # panjang transisi whip-pan / cross-zoom di tepi shot
-GRAIN = 3                # kekuatan film grain di komposit akhir (0 = mati)
+STILL_DUR = 5.0
+STILL_KB_END = 1.08
+DRIFT = 0.06
+CUT_FRAMES = 6
+GRAIN = 3
 FINAL_CRF = 22 if IS_LONG else 23
 FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
@@ -40,13 +40,11 @@ THEMES = {
 }
 
 DEFAULT_STYLE_NOTE = (
-    "Format video panjang landscape 16:9 dokumenter. Susun 15-25 overlay yang informatif, "
-    "kombinasikan big, lower, list, dan qmark. Batasi icon maksimal 3 kali. "
-    "Pakai overlay map hanya jika transkrip menyebut lokasi geografis nyata atau diminta di catatan proyek."
+    "Format video panjang landscape 16:9 dokumenter budaya Suku Baduy yang tenang dan informatif. "
+    "Susun 15-25 overlay berjarak rapi, kombinasikan big, lower, stat, dan list. Batasi icon maksimal 3 kali."
     if IS_LONG else
-    "Gunakan kombinasi dinamis big, lower, list, dan qmark. "
-    "Batasi overlay tipe icon maksimal 2-3 kali saja agar tidak monoton. "
-    "Pakai overlay map hanya jika transkrip menyebut lokasi geografis nyata atau diminta di catatan proyek."
+    "Gunakan kombinasi dinamis big, lower, stat, dan list untuk konten dokumenter Suku Baduy. "
+    "Batasi overlay tipe icon maksimal 2-3 kali saja agar tidak monoton."
 )
 
 
@@ -363,15 +361,34 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
     return [{"s": c["s"], "e": c["e"], "lines": c["cap"]} for c in cues]
 
 
+def _normalize_overlay_type(o: dict) -> dict:
+    """Alihkan tipe 'map' ke 'lower' atau 'big' tanpa koordinat/peta."""
+    if o.get("type") != "map":
+        return o
+    txt = str(o.get("label") or o.get("sub") or o.get("text") or "").strip()
+    o.pop("pin", None)
+    o.pop("zoom", None)
+    o.pop("sub", None)
+    o.pop("label", None)
+    if txt and len(txt.split()) <= 3 and len(txt) <= 24:
+        o["type"] = "big"
+        o["lines"] = [txt.upper()]
+    else:
+        o["type"] = "lower"
+        o["badge"] = o.get("badge") or "CATATAN BUDAYA"
+        o["text"] = (txt or "WILAYAH ADAT").upper()
+    return o
+
+
 def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float) -> list:
-    default_dur = {"lower": 2.8 if IS_LONG else 2.4, "icon": 3.2, "qmark": 2.4, "big": 2.8, "solid": 3.2, "quote": 4.2, "list": 4.2, "produk": 4.0, "map": 4.2}
+    default_dur = {"lower": 2.8 if IS_LONG else 2.4, "icon": 3.2, "qmark": 2.4, "big": 2.8, "solid": 3.2, "stat": 3.6, "quote": 4.2, "list": 4.2, "produk": 4.0}
     ovs = []
     extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.4 if IS_LONG else 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
     if cta_text:
         extra.append({"type": "big", "at": max(0.0, dur - 2.8), "lines": [cta_text], "dur": 2.6, "sfx": "hit", "_fixed": True})
 
     for o in extra + overlays:
-        o = json.loads(json.dumps(o))
+        o = _normalize_overlay_type(json.loads(json.dumps(o)))
         if o["type"] in ("list", "quote"):
             items = o.get("items", [])
             if not items:
@@ -400,7 +417,7 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
             o["t0"] = words[i]["t0"]
         ovs.append(o)
 
-    prio = {"map": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3}
+    prio = {"stat": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3}
 
     def _span(o):
         return o["t0"], o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8))
@@ -454,13 +471,13 @@ CATATAN GAYA & PROYEK:
 ATURAN WAJIB:
 1. Pilih "theme" paling cocok dari: "api", "hutan", "bumi", "laut", "malam".
 2. Buat {target_ov} di array "overlays" (tiap overlay berjarak minimal ~10 detik dari yang lain). Pilih momen penekanan paling strategis. Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
-3. Variasikan "type" overlay (utamakan "big", "lower", "list", dan "qmark"):
+3. Variasikan "type" overlay (utamakan "big", "lower", "stat", dan "list"; JANGAN gunakan tipe "map"):
   - "big": {{"type":"big", "trigger":"...", "lines":["BARIS 1", "BARIS 2"]}} (maks 2-3 baris pendek, kapitals)
-  - "lower": {{"type":"lower", "trigger":"...", "badge":"SOROTAN FAKTA", "text":"TEKS SINGKAT"}}
+  - "lower": {{"type":"lower", "trigger":"...", "badge":"CATATAN BUDAYA", "text":"TEKS SINGKAT"}}
+  - "stat": {{"type":"stat", "trigger":"...", "value":"ANGKA/KUTIPAN SINGKAT", "label":"KETERANGAN SINGKAT"}}
   - "list": {{"type":"list", "trigger":"...", "title":"JUDUL DAFTAR", "items":[{{"text":"POIN 1"}}, {{"text":"POIN 2"}}, {{"text":"POIN 3"}}]}}
   - "icon": {{"type":"icon", "trigger":"...", "icon":"api|bahaya|fakta|berita|waktu|silang|centang", "label":"LABEL SINGKAT"}}
   - "qmark": {{"type":"qmark", "trigger":"...", "label":"PERTANYAAN SINGKAT?"}}
-  - "map": {{"type":"map", "trigger":"...", "pin":[106.25, -6.62], "zoom":55, "label":"NAMA LOKASI", "sub":"KABUPATEN / PROVINSI"}}
 4. Semua teks di dalam overlay HARUS singkat (maksimal 3-6 kata per baris/item) dan menggunakan huruf KAPITAL.
 5. Keluarkan HANYA JSON valid tanpa markdown ```json atau penjelasan lain dengan struktur:
 {{"theme":"...","topic":"...","hook_lines":["...","..."],"keywords":["KATA1","KATA2","KATA3","KATA4","KATA5"],"overlays":[...]}}"""
@@ -707,7 +724,6 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     assert clips, "Tidak ada klip B-roll tersisa untuk dirender!"
     clips = prepare_still_clips(clips, work_dir)
 
-    # 1. Potong & susun B-roll
     hook_cut = 2.2 if IS_LONG else 1.4
     body_cut = 4.2 if IS_LONG else 2.4
     hook_window = 5.0 if IS_LONG else 3.0
@@ -794,7 +810,6 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         if IS_LONG:
             g = "" if still else f"{grade},"
             if c.get("vertical", False) and not still:
-                # Klip HP berdiri di layar lebar 16:9 -> latar blur + klip utama di tengah tanpa terpotong
                 fc = (
                     f"[0:v]fps=30,{grade},split=2[a][b];"
                     f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=35:6,eq=brightness=-0.12[bg];"
@@ -844,7 +859,6 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     base_mp4 = os.path.join(work_dir, "base.mp4")
     sh(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", list_txt, "-c", "copy", base_mp4])
 
-    # 2. Render Overlay Remotion
     prepare_remotion_project(remo_dir)
     download_geo_assets(remo_dir)
 
@@ -891,7 +905,6 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         print(f"[peringatan] Render dengan latar kaca gagal ({str(e)[-300:]}); mengulang tanpa latar kaca...")
         overlay_file, used_codec = render_overlay(None)
 
-    # 3. Audio mix + SFX + Normalisasi -16 LUFS
     SR = 48000
     rng = np.random.default_rng(7)
     n_hit = int(0.25 * SR)
@@ -928,7 +941,6 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
             break
         gain += (-16.0 - lufs)
 
-    # 4. Penggabungan final
     slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")[:40] or "video"
     prefix = "Long" if IS_LONG else "Short"
     out_name = f"{prefix}_{slug}.mp4"
