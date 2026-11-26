@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
 import anthropic
-from remotion_builder import prepare_remotion_project, download_geo_assets
+from remotion_builder import prepare_remotion_project
 
 IS_LONG = os.environ.get("VIDEO_MODE", "").strip().upper() == "LONG"
 FPS = 30
@@ -30,6 +30,9 @@ FINAL_CRF = 22 if IS_LONG else 23
 FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
 OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
+SKIP_PREFIXES = ("output_", "short_", "long_")
+ALLOWED_OVERLAY_TYPES = {"big", "lower", "stat", "list", "icon", "qmark", "quote", "solid"}
+TARGET_LUFS = -16.0
 
 THEMES = {
     "hutan": dict(g=(31, 61, 43), d=(22, 46, 32), m=(45, 92, 67), c=(242, 232, 213), a=(224, 138, 46), k=(17, 17, 17), v=(8, 20, 13)),
@@ -47,12 +50,23 @@ DEFAULT_STYLE_NOTE = (
     "Batasi overlay tipe icon maksimal 2-3 kali saja agar tidak monoton."
 )
 
+_WHISPER_CACHE = {}
 
-def sh(cmd, check=True):
-    r = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True)
+
+# ----------------------------------------------------------------------------
+# Utilitas dasar
+# ----------------------------------------------------------------------------
+def sh(cmd, check=True, cwd=None):
+    r = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, cwd=cwd)
     if check and r.returncode != 0:
-        raise RuntimeError(f"CMD GAGAL: {cmd}\n{r.stderr[-1800:]}")
+        shown = cmd if isinstance(cmd, str) else " ".join(map(str, cmd))
+        raise RuntimeError(f"CMD GAGAL: {shown[:600]}\n{r.stderr[-1800:]}")
     return r
+
+
+def _concat_quote(path: str) -> str:
+    """Escape path untuk file list ffmpeg concat."""
+    return path.replace("'", "'\\''")
 
 
 def probe(path: str) -> dict:
@@ -67,13 +81,16 @@ def probe(path: str) -> dict:
         dur_val = 0.0
     info = {"dur": dur_val}
     if v:
-        rot = int(float(next((sd["rotation"] for sd in v.get("side_data_list", []) if "rotation" in sd), v.get("tags", {}).get("rotate", 0))))
+        try:
+            rot = int(float(next((sd["rotation"] for sd in v.get("side_data_list", []) if "rotation" in sd), v.get("tags", {}).get("rotate", 0))))
+        except (TypeError, ValueError):
+            rot = 0
         w, h = int(v["width"]), int(v["height"])
         if abs(rot) % 180 == 90:
             w, h = h, w
         info.update(w=w, h=h, rot=rot, vertical=h > w)
     if a:
-        info["ch"] = int(a["channels"])
+        info["ch"] = int(a.get("channels", 1))
     return info
 
 
@@ -115,7 +132,8 @@ def prepare_still_clips(clips: list, work_dir: str) -> list:
         if not c.get("is_img"):
             continue
         out_p = os.path.join(still_dir, f"{c['key']}.mp4")
-        if os.path.exists(out_p) or still_to_clip(c["path"], out_p):
+        cached = os.path.exists(out_p) and os.path.getsize(out_p) > 1000
+        if cached or still_to_clip(c["path"], out_p):
             c.update(path=out_p, dur=STILL_DUR, is_img=False, vertical=(not IS_LONG), still=True)
             print("Gambar -> klip:", c["name"])
         else:
@@ -127,7 +145,7 @@ def cut_kind(i: int) -> str:
     return "zoom" if i % 2 == 0 else "whip"
 
 
-def motion_filter(fr: int, drift: float, kin, kout, src_scale: bool = True) -> str:
+def motion_filter(fr: int, drift: float, kin, kout) -> str:
     n = CUT_FRAMES
     terms = []
     if drift:
@@ -156,13 +174,16 @@ def motion_filter(fr: int, drift: float, kin, kout, src_scale: bool = True) -> s
 
 
 def measure(path: str):
+    """Kembalikan (LUFS terintegrasi, true peak dBFS); -inf bila audio senyap."""
     r = sh(["ffmpeg", "-nostats", "-i", path, "-af", "ebur128=peak=true", "-f", "null", "-"])
-    return (
-        float(re.findall(r"I:\s+(-?[\d.]+) LUFS", r.stderr)[-1]),
-        float(re.findall(r"Peak:\s+(-?[\d.]+) dBFS", r.stderr)[-1]),
-    )
+    li = re.findall(r"I:\s+(-?[\d.]+|-inf)\s+LUFS", r.stderr)
+    pk = re.findall(r"Peak:\s+(-?[\d.]+|-inf)\s+dBFS", r.stderr)
+    return (float(li[-1]) if li else float("-inf")), (float(pk[-1]) if pk else float("-inf"))
 
 
+# ----------------------------------------------------------------------------
+# Teks & timing
+# ----------------------------------------------------------------------------
 def syl(w: str) -> int:
     return max(len(re.findall(r"[aiueo]", w.lower())), 1) if re.search(r"\w", w) else 0
 
@@ -178,7 +199,7 @@ def similar(a: str, b: str) -> bool:
 def find_trigger(words: list, trig: str, after: int = 0):
     if not trig:
         return None
-    tk = [norm(x) for x in trig.split() if norm(x)]
+    tk = [norm(x) for x in str(trig).split() if norm(x)]
     if not tk:
         return None
     for i in range(after, len(words) - len(tk) + 1):
@@ -191,6 +212,7 @@ def tighten_vo(src: str, work_dir: str, tight_db: int = -33, max_pause: float = 
     SR = 48000
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", src, "-f", "f32le", "-ac", "1", "-ar", str(SR), "-"], capture_output=True).stdout
     x = np.frombuffer(raw, np.float32).copy()
+    assert len(x) > 0, f"Audio VO kosong/tidak terbaca: {src}"
     dur = len(x) / SR
     r = sh(["ffmpeg", "-hide_banner", "-i", src, "-af", f"silencedetect=noise={tight_db}dB:d=0.10", "-f", "null", "-"])
     ss = [float(v) for v in re.findall(r"silence_start: (-?[\d.]+)", r.stderr)]
@@ -242,7 +264,9 @@ def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"
         for w in u.split():
             words.append({"w": w, "n": norm(w), "syl": syl(w), "u": ui})
         units.append([a, len(words)])
+    assert words, "Teks narasi kosong."
 
+    # Perkiraan awal berbasis suku kata (cadangan bila Whisper tidak cocok)
     t_cur = sp0
     tot_s = sum(w["syl"] for w in words) or 1
     for w in words:
@@ -254,8 +278,10 @@ def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"
     raw_16k = subprocess.run(["ffmpeg", "-v", "error", "-i", vo_path, "-f", "f32le", "-ac", "1", "-ar", "16000", "-"], capture_output=True).stdout
     audio_np = np.frombuffer(raw_16k, np.float32)
 
-    m = WhisperModel(model_name, device="cpu", compute_type="int8")
-    segs, _ = m.transcribe(audio_np, language="id", word_timestamps=True, beam_size=5)
+    if model_name not in _WHISPER_CACHE:
+        _WHISPER_CACHE[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
+    m = _WHISPER_CACHE[model_name]
+    segs, _ = m.transcribe(audio_np, language="id", word_timestamps=True, beam_size=5, condition_on_previous_text=False)
     ws = [(norm(w.word), float(w.start), float(w.end)) for sg in segs for w in (sg.words or []) if norm(w.word)]
 
     tgt, src = [w["n"] for w in words], [x[0] for x in ws]
@@ -268,6 +294,8 @@ def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"
                 t0[i1 + k], t1[i1 + k] = ws[j1 + k][1], ws[j1 + k][2]
     known = sum(x is not None for x in t0)
     print(f"Whisper: {known}/{n} kata cocok dengan transkrip!")
+    if known < n * 0.5:
+        print("(!) Kecocokan Whisper rendah; timing sebagian besar memakai perkiraan suku kata. Periksa teks narasi vs audio.")
 
     i = 0
     while i < n:
@@ -288,13 +316,13 @@ def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"
             t0[k], t1[k] = t, t + d
             t += d
         i = j
-    for k in range(1, n):
-        if t0[k] < t1[k - 1]:
+    for k in range(n):
+        if k > 0 and t0[k] < t1[k - 1]:
             t0[k] = t1[k - 1]
         if t1[k] < t0[k] + 0.04:
             t1[k] = t0[k] + 0.04
     for k, w in enumerate(words):
-        w["t0"], w["t1"] = t0[k], t1[k]
+        w["t0"], w["t1"] = min(t0[k], dur), min(t1[k], dur)
 
     return words, units, unit_texts
 
@@ -319,7 +347,17 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
                 cur = []
         if cur:
             groups.append(cur)
-        return [g for g in groups if len(g) > 1] or groups
+        # Gabungkan grup berisi 1 kata ke tetangganya (versi lama membuangnya sehingga kata hilang dari caption)
+        merged = []
+        for g in groups:
+            if len(g) == 1 and merged:
+                merged[-1].extend(g)
+            else:
+                merged.append(list(g))
+        if len(merged) > 1 and len(merged[0]) == 1:
+            merged[1] = merged[0] + merged[1]
+            merged.pop(0)
+        return merged
 
     def break2(ws):
         n = len(ws)
@@ -333,6 +371,8 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
         fl, cnt = [False] * len(ws), 0
         for kw in kw_tok:
             L = len(kw)
+            if L == 0:
+                continue
             for i in range(len(ws) - L + 1):
                 if norms[i:i + L] == kw and not any(fl[i:i + L]) and cnt < 2:
                     for j in range(L):
@@ -352,7 +392,7 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
             fl = flags_for(g)
             idx = {id(w): f for w, f in zip(g, fl)}
             capl = [[{"w": w["w"], "kw": bool(idx[id(w)]), "t0": w["t0"], "t1": w["t1"]} for w in ln] for ln in break2(g)]
-            cues.append({"s": g[0]["t0"] - 0.04, "e": g[-1]["t1"] + 0.12, "cap": capl})
+            cues.append({"s": max(g[0]["t0"] - 0.04, 0.0), "e": g[-1]["t1"] + 0.12, "cap": capl})
     for i in range(1, len(cues)):
         if cues[i]["s"] < cues[i - 1]["e"] + 0.03:
             cues[i - 1]["e"] = max(cues[i]["s"] - 0.03, cues[i - 1]["s"] + 0.15)
@@ -361,8 +401,11 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
     return [{"s": c["s"], "e": c["e"], "lines": c["cap"]} for c in cues]
 
 
+# ----------------------------------------------------------------------------
+# Overlay
+# ----------------------------------------------------------------------------
 def _normalize_overlay_type(o: dict) -> dict:
-    """Alihkan tipe 'map' ke 'lower' atau 'big' tanpa koordinat/peta."""
+    """Konversi defensif overlay lama bertipe 'map' menjadi 'big'/'lower' (teks saja, tanpa koordinat/pin)."""
     if o.get("type") != "map":
         return o
     txt = str(o.get("label") or o.get("sub") or o.get("text") or "").strip()
@@ -389,7 +432,7 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
 
     for o in extra + overlays:
         o = _normalize_overlay_type(json.loads(json.dumps(o)))
-        if o["type"] in ("list", "quote"):
+        if o.get("type") in ("list", "quote"):
             items = o.get("items", [])
             if not items:
                 continue
@@ -415,6 +458,8 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
             if i is None:
                 continue
             o["t0"] = words[i]["t0"]
+        if o["t0"] >= dur - 0.3:
+            continue
         ovs.append(o)
 
     prio = {"stat": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3}
@@ -441,14 +486,44 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
     for k, o in enumerate(ovs):
         o.pop("_fixed", None)
         nxt = ovs[k + 1]["t0"] - 0.1 if k + 1 < len(ovs) else dur
-        o["t1"] = min(o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8)), nxt, dur)
+        o["t1"] = max(min(o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8)), nxt, dur), o["t0"] + 0.3)
         for it in o.get("items", []):
             it["_t"] = max(0.0, it["abs"] - o["t0"])
     return ovs
 
 
+# ----------------------------------------------------------------------------
+# Auto Director (Claude)
+# ----------------------------------------------------------------------------
 def _extract_claude_text(resp) -> str:
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+
+
+def _parse_json_loose(txt: str) -> dict:
+    txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt.strip())
+    a, b = txt.find("{"), txt.rfind("}")
+    assert a >= 0 and b > a, f"Balasan tidak berisi JSON: {txt[:200]}"
+    return json.loads(txt[a:b + 1])
+
+
+def _sanitize_plan(p: dict) -> dict:
+    if not isinstance(p, dict):
+        raise ValueError("Rencana bukan objek JSON")
+    ovs = []
+    for o in p.get("overlays") or []:
+        if not isinstance(o, dict) or o.get("type") not in ALLOWED_OVERLAY_TYPES:
+            continue
+        if o.get("type") in ("list", "quote") or o.get("trigger"):
+            ovs.append(o)
+    if not ovs:
+        raise ValueError("Tidak ada overlay valid dalam rencana")
+    return {
+        "theme": p.get("theme") if p.get("theme") in THEMES else "hutan",
+        "topic": str(p.get("topic") or "video"),
+        "hook_lines": [str(x).strip().upper() for x in (p.get("hook_lines") or []) if str(x).strip()][:3],
+        "keywords": [str(x).strip().upper() for x in (p.get("keywords") or []) if str(x).strip()][:8],
+        "overlays": ovs,
+    }
 
 
 def run_auto_director(client: anthropic.Anthropic, text: str, style_note: str, project_note: str, model: str = "claude-sonnet-4-6") -> dict:
@@ -482,29 +557,43 @@ ATURAN WAJIB:
 5. Keluarkan HANYA JSON valid tanpa markdown ```json atau penjelasan lain dengan struktur:
 {{"theme":"...","topic":"...","hook_lines":["...","..."],"keywords":["KATA1","KATA2","KATA3","KATA4","KATA5"],"overlays":[...]}}"""
 
-    resp = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": dir_prompt}],
-    )
-    txt = _extract_claude_text(resp)
-    a, b = txt.find("{"), txt.rfind("}")
-    assert a >= 0 and b > a, f"Balasan Auto Director tidak berisi JSON: {txt[:200]}"
-    return json.loads(txt[a:b + 1])
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": dir_prompt}],
+            )
+            return _sanitize_plan(_parse_json_loose(_extract_claude_text(resp)))
+        except Exception as e:
+            last_err = e
+            print(f"(!) Auto Director percobaan {attempt}/3 gagal: {str(e)[:180]}")
+    raise RuntimeError(f"Auto Director gagal setelah 3 percobaan: {last_err}")
 
 
+# ----------------------------------------------------------------------------
+# B-roll
+# ----------------------------------------------------------------------------
 def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) -> list:
     frames_root = os.path.join(work_dir, "frames")
     os.makedirs(frames_root, exist_ok=True)
     cands = [
         p for p in sorted(glob.glob(f"{proj_dir}/*"))
         if p.lower().endswith(VID_EXT + IMG_EXT)
-        and not any(x in os.path.basename(p).lower() for x in ("output_", "short_", "long_"))
+        and not os.path.basename(p).lower().startswith(SKIP_PREFIXES)
     ]
     clips = []
     for p in cands:
         name = os.path.basename(p)
-        info = probe(p)
+        try:
+            info = probe(p)
+        except Exception as e:
+            print(f"(!) Lewati {name} (tidak terbaca): {str(e)[:120]}")
+            continue
+        if not info.get("w"):
+            print(f"(!) Lewati {name} (tanpa stream video)")
+            continue
         is_img = p.lower().endswith(IMG_EXT)
         if is_img:
             info["dur"] = STILL_DUR
@@ -516,7 +605,10 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
             if is_img:
                 sh(["ffmpeg", "-y", "-v", "error", "-i", p, "-vf", "scale=480:-2", "-q:v", "4", f"{d}/0001.jpg"])
             else:
-                sh(["ffmpeg", "-y", "-v", "error", "-i", p, "-vf", "fps=1,scale=480:-2", "-q:v", "4", f"{d}/%04d.jpg"])
+                total = info.get("dur") or 0.0
+                for n_i, frac in enumerate((0.1, 0.37, 0.63, 0.9), 1):
+                    sh(["ffmpeg", "-y", "-v", "error", "-ss", f"{total * frac:.2f}", "-i", p, "-frames:v", "1",
+                        "-vf", "scale=480:-2", "-q:v", "4", f"{d}/{n_i:04d}.jpg"], check=False)
         info["frames"] = sorted(glob.glob(f"{d}/*.jpg"))
         clips.append(info)
     return clips
@@ -560,8 +652,12 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
     }
 
     cache_p = os.path.join(proj_dir, "clip_labels.json")
-    cache = json.load(open(cache_p, encoding="utf-8")) if os.path.exists(cache_p) else {}
+    try:
+        cache = json.load(open(cache_p, encoding="utf-8")) if os.path.exists(cache_p) else {}
+    except Exception:
+        cache = {}
 
+    dirty = False
     for c in clips:
         sz = os.path.getsize(c["path"])
         if c["name"] in cache and cache[c["name"]].get("size") == sz:
@@ -572,33 +668,32 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
             if not fr:
                 continue
             idxs = sorted({int(i * (len(fr) - 1) / 3) for i in range(4)}) if len(fr) > 1 else [0]
-            content = [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": base64.b64encode(open(fr[i], "rb").read()).decode(),
-                    },
-                }
-                for i in idxs
-            ]
+            content = []
+            for i in idxs:
+                with open(fr[i], "rb") as fh:
+                    content.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(fh.read()).decode()},
+                    })
             content.append({"type": "text", "text": f"Nama file: {c['name']}. Panggil tool label_klip untuk mendeskripsikan isi visualnya secara ringkas."})
             r = client.messages.create(
                 model=model,
                 max_tokens=600,
                 tools=[label_tool],
-                tool_choice={"type": "auto"},
+                tool_choice={"type": "tool", "name": "label_klip"},
                 messages=[{"role": "user", "content": content}],
             )
             tu = next((b for b in r.content if getattr(b, "type", "") == "tool_use"), None)
             if tu is not None:
                 out = tu.input
                 cache[c["name"]] = {"size": sz, **out}
-                json.dump(cache, open(cache_p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+                dirty = True
                 print("Label baru:", c["name"], "->", out.get("deskripsi", "")[:60])
         except Exception as e:
             print(f"(!) Gagal label {c['name']}: {str(e)[:180]}")
+    if dirty:
+        with open(cache_p, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=2)
 
     ids = {f"K{i + 1:02d}": c for i, c in enumerate(clips)}
     klip_list = [
@@ -613,7 +708,7 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
             model=model,
             max_tokens=3000,
             tools=[match_tool],
-            tool_choice={"type": "auto"},
+            tool_choice={"type": "tool", "name": "cocokkan_klip"},
             messages=[
                 {
                     "role": "user",
@@ -636,52 +731,71 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
     return hints
 
 
+# ----------------------------------------------------------------------------
+# Perintah edit
+# ----------------------------------------------------------------------------
 def apply_edit_command(state: dict, raw_cmd: str) -> dict:
-    cmd_part = raw_cmd.split("|", 1)[1].strip() if "|" in raw_cmd else raw_cmd.strip()
-    low = raw_cmd.strip().lower()
+    """Format: '/perintah argumen' atau '/perintah | argumen'."""
+    m = re.match(r"\s*(/\w+)\s*(?:\|\s*)?(.*)$", raw_cmd or "", re.S)
+    if not m:
+        return state
+    cmd, arg = m.group(1).lower(), m.group(2).strip()
 
-    if low.startswith("/hapus"):
+    if cmd == "/hapus":
         nums = set()
-        for tok in re.split(r"[,\s]+", cmd_part):
+        for tok in re.split(r"[,\s]+", arg):
             if "-" in tok:
                 a, b = tok.split("-", 1)
                 if a.isdigit() and b.isdigit():
                     nums.update(range(int(a), int(b) + 1))
             elif tok.isdigit():
                 nums.add(int(tok))
-        state["overlays"] = [o for i, o in enumerate(state["overlays"], 1) if i not in nums]
+        state["overlays"] = [o for i, o in enumerate(state.get("overlays", []), 1) if i not in nums]
 
-    elif low.startswith("/tema"):
-        t = cmd_part.lower()
+    elif cmd == "/tema":
+        t = arg.lower()
         if t in THEMES:
             state["theme"] = t
 
-    elif low.startswith("/hook"):
-        if cmd_part == "-":
-            state["hook_lines"] = []
-        else:
-            state["hook_lines"] = [h.strip().upper() for h in cmd_part.split("|") if h.strip()]
+    elif cmd == "/hook":
+        state["hook_lines"] = [] if arg == "-" else [h.strip().upper() for h in arg.split("|") if h.strip()]
 
-    elif low.startswith("/cta"):
-        state["cta_text"] = "" if cmd_part == "-" else cmd_part.strip().upper()
+    elif cmd == "/cta":
+        state["cta_text"] = "" if arg == "-" else arg.upper()
 
-    elif low.startswith("/klip"):
+    elif cmd == "/klip":
         items = list(state.get("clip_hints", {}).items())
-        for chunk in cmd_part.split(";"):
+        usable = state.get("usable_names", [])
+        for chunk in arg.split(";"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
             if "=" not in chunk:
+                print(f"(!) /klip: '{chunk}' dilewati, format harus 'frasa=klip' atau 'nomor=klip'.")
                 continue
             k, v = [x.strip() for x in chunk.split("=", 1)]
-            matched_name = next((nm for nm in state.get("usable_names", []) if v.lower() in nm.lower()), None)
-            if not matched_name:
+            if not k or not v:
+                print(f"(!) /klip: '{chunk}' dilewati, bagian kiri atau kanan '=' kosong.")
                 continue
-            if k.isdigit() and 1 <= int(k) <= len(items):
-                items[int(k) - 1] = (items[int(k) - 1][0], matched_name)
+            matched_name = next((nm for nm in usable if v.lower() in nm.lower()), None)
+            if not matched_name:
+                print(f"(!) /klip: nama klip '{v}' tidak cocok dengan klip yang tersedia ({len(usable)} klip).")
+                continue
+            if k.isdigit():
+                idx = int(k)
+                if not items:
+                    print(f"(!) /klip: indeks {idx} tidak bisa dipakai karena clip_hints masih kosong; gunakan format 'frasa=klip'.")
+                    continue
+                if not 1 <= idx <= len(items):
+                    print(f"(!) /klip: indeks {idx} di luar rentang 1-{len(items)}; perintah dilewati.")
+                    continue
+                items[idx - 1] = (items[idx - 1][0], matched_name)
             else:
                 items.append((k, matched_name))
         state["clip_hints"] = dict(items)
 
-    elif low.startswith("/buang_klip"):
-        bad = {x.strip().lower() for x in cmd_part.split(",") if x.strip()}
+    elif cmd == "/buang_klip":
+        bad = {x.strip().lower() for x in arg.split(",") if x.strip()}
         state["excluded_clips"] = list(set(state.get("excluded_clips", [])) | bad)
         state["clip_hints"] = {
             f: nm for f, nm in state.get("clip_hints", {}).items()
@@ -691,7 +805,11 @@ def apply_edit_command(state: dict, raw_cmd: str) -> dict:
     return state
 
 
+# ----------------------------------------------------------------------------
+# Render final
+# ----------------------------------------------------------------------------
 def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str = "/tmp/remotion_overlay") -> str:
+    os.makedirs(work_dir, exist_ok=True)
     vo_path = os.path.join(work_dir, "VO_padat.wav")
     if not os.path.exists(vo_path):
         audio_cands = sorted(glob.glob(f"{proj_dir}/*.mp3") + glob.glob(f"{proj_dir}/*.m4a") + glob.glob(f"{proj_dir}/*.wav"))
@@ -700,6 +818,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
 
     vo_info = probe(vo_path)
     dur = vo_info["dur"]
+    assert dur > 1.0, "Durasi VO terlalu pendek."
     n_frames = round(dur * FPS)
 
     words = state["words"]
@@ -715,7 +834,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
 
     caps = build_captions(words, units, keywords, dur)
     ovs = lock_overlays(words, overlays_raw, hook_lines, cta_text, dur)
-    sfx_ev = [(0.15, "hit")] if hook_lines else []
+    sfx_ev = sorted({round(o["t0"], 2) for o in ovs if o.get("sfx")})
 
     clips = [
         c for c in scan_local_clips(proj_dir, work_dir, extract_frames=False)
@@ -781,7 +900,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     os.makedirs(shots_dir, exist_ok=True)
 
     phone_png = os.path.join(work_dir, "phone.png")
-    if not IS_LONG:
+    if not IS_LONG and not os.path.exists(phone_png):
         sd = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         ImageDraw.Draw(sd).rounded_rectangle([80, 427, 1000, 962], radius=56, fill=(0, 0, 0, 130))
         l_ph = sd.filter(ImageFilter.GaussianBlur(18))
@@ -848,19 +967,25 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     print(f"Memotong {n_sh} shot B-roll ({workers} paralel)...")
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(render_shot, s) for s in shots]
-        for f in as_completed(futs):
-            f.result()
+        try:
+            for f in as_completed(futs):
+                f.result()
+        except Exception:
+            for f in futs:
+                f.cancel()
+            raise
 
     list_txt = os.path.join(work_dir, "list.txt")
     with open(list_txt, "w") as fh:
         for s in shots:
             shot_p = os.path.join(shots_dir, f"s{s['i']:03d}.mp4")
-            fh.write(f"file '{shot_p}'\n")
+            fh.write(f"file '{_concat_quote(shot_p)}'\n")
     base_mp4 = os.path.join(work_dir, "base.mp4")
     sh(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", list_txt, "-c", "copy", base_mp4])
 
     prepare_remotion_project(remo_dir)
-    download_geo_assets(remo_dir)
+    os.makedirs(f"{remo_dir}/out", exist_ok=True)
+    os.makedirs(f"{remo_dir}/public", exist_ok=True)
 
     _hex = lambda t: "#%02X%02X%02X" % tuple(t)
     _t = THEMES[theme_name]
@@ -881,7 +1006,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     except Exception as e:
         print(f"[peringatan] Latar kaca buram dilewati: {str(e)[:200]}")
 
-    conc = max(2, min(4, os.cpu_count() or 2))
+    conc = str(max(2, min(4, os.cpu_count() or 2)))
 
     def render_overlay(glass):
         props = {"overlays": ovs, "fps": FPS, "durationInFrames": n_frames, "images": [], "captions": caps, "theme": t_props, "glassSrc": glass}
@@ -889,12 +1014,14 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
             json.dump(props, fh, sort_keys=True)
         ov_file, codec = f"{remo_dir}/out/overlay.webm", "vp9"
         try:
-            sh(f"cd {remo_dir} && npx remotion render src/index.ts Overlay {ov_file} --props=props.json --codec=vp9 --pixel-format=yuva420p --image-format=png --crf=18 --overwrite --concurrency={conc}")
+            sh(["npx", "remotion", "render", "src/index.ts", "Overlay", ov_file, "--props=props.json", "--codec=vp9",
+                "--pixel-format=yuva420p", "--image-format=png", "--crf=18", "--overwrite", f"--concurrency={conc}"], cwd=remo_dir)
         except Exception as e:
-            print(f"[peringatan] VP9 gagal ({e}); beralih ke ProRes 4444...")
+            print(f"[peringatan] VP9 gagal ({str(e)[-300:]}); beralih ke ProRes 4444...")
             codec = "prores"
             ov_file = f"{remo_dir}/out/overlay.mov"
-            sh(f"cd {remo_dir} && npx remotion render src/index.ts Overlay {ov_file} --props=props.json --codec=prores --prores-profile=4444 --pixel-format=yuva444p10le --image-format=png --overwrite --concurrency={conc}")
+            sh(["npx", "remotion", "render", "src/index.ts", "Overlay", ov_file, "--props=props.json", "--codec=prores",
+                "--prores-profile=4444", "--pixel-format=yuva444p10le", "--image-format=png", "--overwrite", f"--concurrency={conc}"], cwd=remo_dir)
         return ov_file, codec
 
     try:
@@ -905,6 +1032,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         print(f"[peringatan] Render dengan latar kaca gagal ({str(e)[-300:]}); mengulang tanpa latar kaca...")
         overlay_file, used_codec = render_overlay(None)
 
+    # --- SFX + mix audio ---
     SR = 48000
     rng = np.random.default_rng(7)
     n_hit = int(0.25 * SR)
@@ -917,7 +1045,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     hit = (hit / np.max(np.abs(hit)) * 0.9) * (10 ** (-12 / 20))
 
     stem = np.zeros(int(dur * SR) + SR)
-    for t_ev, _ in sfx_ev:
+    for t_ev in sfx_ev:
         st = int(t_ev * SR)
         if st < len(stem):
             seg = hit[:len(stem) - st]
@@ -928,7 +1056,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
 
     mix_wav = os.path.join(work_dir, "mix.wav")
     pan = "pan=stereo|c0=c0|c1=c0" if vo_info.get("ch", 1) == 1 else "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1"
-    gain, lufs = 0.0, -16.0
+    gain = 0.0
     for _ in range(8):
         fc = (
             f"[0:a]aresample=48000,afade=t=in:d=0.01,acompressor=threshold=0.09:ratio=3:attack=4:release=60,"
@@ -937,11 +1065,12 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         )
         sh(["ffmpeg", "-y", "-v", "error", "-i", vo_path, "-i", stem_wav, "-filter_complex", fc, "-map", "[m]", "-ar", "48000", "-ac", "2", "-t", f"{dur:.4f}", mix_wav])
         lufs, _ = measure(mix_wav)
-        if abs(lufs - (-16.0)) < 0.1:
+        if not math.isfinite(lufs) or abs(lufs - TARGET_LUFS) < 0.1:
             break
-        gain += (-16.0 - lufs)
+        gain = max(-30.0, min(30.0, gain + (TARGET_LUFS - lufs)))
 
-    slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")[:40] or "video"
+    # --- Gabung final ---
+    slug = re.sub(r"[^a-z0-9]+", "_", str(topic).lower()).strip("_")[:40] or "video"
     prefix = "Long" if IS_LONG else "Short"
     out_name = f"{prefix}_{slug}.mp4"
     final_mp4 = os.path.join(work_dir, out_name)
@@ -955,7 +1084,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         + ov_in
         + [
             "-i", mix_wav, "-filter_complex", fc_final,
-            "-map", "[v]", "-map", "2:a", "-frames:v", str(n_frames),
+            "-map", "[v]", "-map", "2:a", "-frames:v", str(n_frames), "-shortest",
             "-c:v", "libx264", "-crf", str(FINAL_CRF), "-maxrate", FINAL_MAXRATE, "-bufsize", "20M", "-preset", "medium", "-pix_fmt", "yuv420p",
             "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart", final_mp4,
