@@ -36,7 +36,7 @@ def main():
     assert folder_name, "INPUT_FOLDER_NAME kosong!"
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    assert api_key or gemini_key, "Pasang GEMINI_API_KEY (gratis) atau ANTHROPIC_API_KEY di Secrets!"
+    pass  # Berjalan penuh secara lokal tanpa wajib API key
 
     work_dir = "/tmp/work_proj"
     proj_dir = os.path.join(work_dir, "assets")

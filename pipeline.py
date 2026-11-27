@@ -619,53 +619,71 @@ def _sanitize_plan(p: dict) -> dict:
     }
 
 
-def _gemini_post(payload: dict, timeout: int = 45) -> dict:
-    import urllib.request, urllib.error
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY kosong")
-    cands = []
-    for ver in ("v1beta", "v1"):
-        try:
-            with urllib.request.urlopen(f"https://generativelanguage.googleapis.com/{ver}/models?key={key}", timeout=15) as r:
-                ms = json.loads(r.read().decode()).get("models", [])
-            for m in ms:
-                nm = m["name"].replace("models/", "")
-                if "generateContent" in m.get("supportedGenerationMethods", []) and "gemini" in nm and "embedding" not in nm:
-                    cands.append((ver, nm))
-        except Exception:
-            pass
-    pref = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest", "gemini-1.5-flash"]
-    cands = sorted(dict.fromkeys(cands), key=lambda x: (next((i for i, p in enumerate(pref) if x[1].startswith(p)), 99), 0 if x[0] == "v1beta" else 1))
-    if not cands:
-        cands = [("v1beta", "gemini-2.0-flash"), ("v1", "gemini-2.0-flash"), ("v1beta", "gemini-flash-latest")]
-    err = None
-    for ver, mdl in cands[:8]:
-        try:
-            pl = json.loads(json.dumps(payload))
-            if ver == "v1":
-                pl.get("generationConfig", {}).pop("responseMimeType", None)
-            req = urllib.request.Request(f"https://generativelanguage.googleapis.com/{ver}/models/{mdl}:generateContent?key={key}", data=json.dumps(pl).encode(), headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                print(f"[Gemini] OK -> {ver}/{mdl}")
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as he:
-            err = f"HTTP {he.code} ({ver}/{mdl}): {he.read().decode(errors='ignore')[:180]}"
-            if he.code in (400, 404): continue
-            raise RuntimeError(err)
-        except Exception as e:
-            err = f"{ver}/{mdl}: {str(e)[:150]}"
-    raise RuntimeError(err or "Semua model Gemini gagal")
+def _local_smart_plan(prompt: str) -> dict:
+    # Mode 1: Pencocokan Kalimat -> Klip dari daftar JSON di prompt
+    if "DAFTAR KLIP TERSEDIA DI GOOGLE DRIVE:" in prompt:
+        m_kal = re.search(r"DAFTAR KALIMAT & VISUAL YANG DIBUTUHKAN:\n(\[.*?\])\n\nDAFTAR KLIP", prompt, re.S)
+        m_klip = re.search(r"DAFTAR KLIP TERSEDIA DI GOOGLE DRIVE:\n(\[.*?\])\n\nATURAN", prompt, re.S)
+        kals = json.loads(m_kal.group(1)) if m_kal else []
+        klips = json.loads(m_klip.group(1)) if m_klip else []
+        stop = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu", "ada", "atau", "juga"}
+        pilihan, used_recent = [], []
+        for k in kals:
+            q_words = set(re.findall(r"[a-z0-9]{3,}", (k.get("kalimat", "") + " " + k.get("keyword", "")).lower())) - stop
+            best_c, best_sc = (klips[0] if klips else None), -1
+            for c in klips:
+                c_words = set(re.findall(r"[a-z0-9]{3,}", (c.get("nama_file", "") + " " + c.get("deskripsi_visual", "")).lower())) - stop
+                sc = len(q_words & c_words) * 3 - (2 if c.get("id") in used_recent[-2:] else 0)
+                if sc > best_sc:
+                    best_sc, best_c = sc, c
+            if best_c:
+                used_recent.append(best_c["id"])
+                trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", k.get("kalimat", "").lower()).split()[:4])
+                pilihan.append({"no": k.get("no", 1), "kalimat": k.get("kalimat", ""), "frasa_trigger": trig, "id_klip": best_c["id"], "alasan": f"Kecocokan kata kunci ({max(best_sc,1)} poin)"})
+        return {"pilihan": pilihan}
+
+    # Mode 2: Sutradara Per Kalimat dari TRANSKRIP
+    m_trx = re.search(r"TRANSKRIP:\n(.*?)\n\nCATATAN GAYA", prompt, re.S)
+    trx = m_trx.group(1).strip() if m_trx else ""
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", trx) if len(s.strip()) > 6]
+    if not sents:
+        sents = [trx]
+    stop = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu", "ada", "warga", "dalam", "saat"}
+    scenes, facts, kws = [], [], []
+    last_ov_idx = -3
+    for idx, s in enumerate(sents, 1):
+        words_s = [w for w in re.findall(r"[a-zA-Z0-9]{4,}", s) if w.lower() not in stop]
+        kw = " ".join(words_s[:3]).lower() or "dokumentasi lapangan"
+        kws.append(kw.upper())
+        nums = re.findall(r"(?:Rp\s*)?\d[\d.,]*", s)
+        has_cap = bool(re.findall(r"\b[A-Z]{2,}|\b[A-Z][a-z]+\s+[A-Z][a-z]+", s))
+        skor = 5 if (nums or "?" in s or idx in (1, len(sents))) else (4 if has_cap else 2)
+        if nums or has_cap:
+            facts.append(s[:110])
+        ov = None
+        if skor >= 4 and (idx - last_ov_idx) >= 2 and len([x for x in scenes if x["overlay"]]) < 6:
+            trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", s.lower()).split()[:3])
+            if nums:
+                raw_n = int(re.sub(r"\D", "", nums[0]) or "0")
+                pref = "Rp " if "rp" in s.lower() else ""
+                ov = {"type": "stat_counter", "trigger": trig, "prefix": pref, "value": raw_n, "suffix": "", "label": (words_s[0] if words_s else "DATA").upper(), "alasan": "Angka konkret"}
+            elif idx == 1 or has_cap:
+                lines_rt = [w.upper() for w in words_s[:2]] or ["SOROTAN", "UTAMA"]
+                ov = {"type": "roto_typo", "trigger": trig, "lines": lines_rt, "alasan": "Tokoh / momen kunci"}
+            else:
+                ov = {"type": "marker_quote", "trigger": trig, "badge": "FAKTA LAPANGAN", "text": " ".join(s.split()[:6]).upper(), "alasan": "Poin utama"}
+            last_ov_idx = idx
+        scenes.append({"narasi": s, "visual_literal": f"Rekaman nyata: {kw}", "keyword_cari": kw, "skor_penting": skor, "overlay": ov})
+
+    first_w = [w.upper() for w in re.findall(r"[a-zA-Z0-9]{3,}", sents[0])[:4]]
+    hook = [" ".join(first_w[:2]) or "FAKTA LAPANGAN", " ".join(first_w[2:4]) or "SELENGKAPNYA"]
+    cta = next((s for s in reversed(sents) if "?" in s), "Bagaimana pendapat Anda tentang kejadian ini?")
+    return {"theme": "bumi", "topic": " ".join(first_w[:3]) or "DOKUMENTER", "hook_lines": hook, "fakta_konkret": facts[:4] or sents[:3], "cta_pertanyaan": cta, "keywords": list(dict.fromkeys(kws))[:8], "scenes": scenes}
 
 
 def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonnet-4-6") -> dict:
-    if os.environ.get("GEMINI_API_KEY", "").strip():
-        d = _gemini_post({"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0.35}}, timeout=45)
-        return _parse_json_loose(d["candidates"][0]["content"]["parts"][0]["text"])
-    if anthropic_client is not None:
-        resp = anthropic_client.messages.create(model=model, max_tokens=4096, messages=[{"role": "user", "content": prompt}])
-        return _parse_json_loose(_extract_claude_text(resp))
-    raise RuntimeError("Tidak ada API key aktif")
+    print("[Planner] Menggunakan Smart Local Planner (0 API, 0 kuota)...")
+    return _local_smart_plan(prompt)
 
 
 def run_auto_director(client: anthropic.Anthropic, text: str, style_note: str, project_note: str, model: str = "claude-sonnet-4-6") -> dict:
@@ -777,34 +795,8 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
     return clips
 
 
-def _gemini_vision_label(frames: list, clip_name: str) -> dict | None:
-    import urllib.request
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not gemini_key or not frames:
-        return None
-    idxs = sorted({int(i * (len(frames) - 1) / 3) for i in range(4)}) if len(frames) > 1 else [0]
-    parts = []
-    for i in idxs:
-        with open(frames[i], "rb") as fh:
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": base64.b64encode(fh.read()).decode("utf-8"),
-                }
-            })
-    parts.append({
-        "text": (
-            f"Nama file: {clip_name}. Amati gambar-gambar dari klip video/foto ini. "
-            "Jelaskan secara LITERAL apa yang tampak di layar (siapa tokohnya, apa aksinya, benda apa yang terlihat, suasananya). "
-            'Keluarkan HANYA JSON valid: {"deskripsi":"...","tag":["kata1","kata2","kata3"],"ada_orang":true,"wajah_jelas":true}'
-        )
-    })
-    data = _gemini_post({
-        "contents": [{"parts": parts}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
-    }, timeout=45)
-    txt = data["candidates"][0]["content"]["parts"][0]["text"]
-    return _parse_json_loose(txt)
+def _gemini_vision_label(frames: list, clip_name: str):
+    return None
 
 
 def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, words: list, proj_dir: str, model: str = "claude-sonnet-4-6", scenes: list = None) -> dict:
