@@ -8,7 +8,6 @@ REMO_FILES = {
     "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352","@remotion/motion-blur":"4.0.352","@remotion/paths":"4.0.352","@remotion/transitions":"4.0.352"}}""",
     "tsconfig.json": r"""{"compilerOptions":{"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":false,"skipLibCheck":true,"esModuleInterop":true,"noEmit":true},"include":["src"]}""",
     "src/index.ts": r"""import {registerRoot} from "remotion";
-import {CameraMotionBlur} from "@remotion/motion-blur";
 import {Root} from "./Root";
 registerRoot(Root);
 """,
@@ -38,6 +37,8 @@ import {
   AbsoluteFill, Sequence, OffthreadVideo, useCurrentFrame, useVideoConfig, spring, interpolate,
   Easing, random, staticFile,
 } from "remotion";
+import {CameraMotionBlur} from "@remotion/motion-blur";
+import {evolvePath} from "@remotion/paths";
 import {loadFont as loadMontserrat} from "@remotion/google-fonts/Montserrat";
 import {loadFont as loadOswald} from "@remotion/google-fonts/Oswald";
 import {loadFont as loadPlayfair} from "@remotion/google-fonts/PlayfairDisplay";
