@@ -214,7 +214,7 @@ const RotoTypo: React.FC<any> = ({o, dur}) => {
               fontFamily: F_COND, fontWeight: 700,
               fontSize: isLand ? 156 : 168, lineHeight: 0.96, letterSpacing: 2,
               color: isAccent ? C.orange : C.cream,
-              textShadow: "0 12px 40px rgba(0,0,0,0.85)",
+              WebkitTextStroke: `6px ${C.black}`, paintOrder: "stroke fill", textShadow: "0 12px 40px rgba(0,0,0,0.9)",
               transform: `translateY(${(1 - p) * 70}px) scale(${0.92 + p * 0.08})`,
               opacity: p,
               textAlign: "center",

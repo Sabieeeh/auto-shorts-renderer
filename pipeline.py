@@ -13,6 +13,7 @@ from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
 import anthropic
 from remotion_builder import prepare_remotion_project
+from roto_helper import extract_roto_layer
 
 IS_LONG = os.environ.get("VIDEO_MODE", "").strip().upper() == "LONG"
 FPS = 30
@@ -609,7 +610,7 @@ CATATAN GAYA & PROYEK:
 ATURAN WAJIB:
 1. Pilih "theme" paling cocok dari: "api", "hutan", "bumi", "laut", "malam".
 2. Buat {target_ov} di array "overlays" (tiap overlay berjarak minimal ~7 detik dari yang lain). Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
-3. Gunakan HANYA 4 tipe animasi dinamis berikut secara bergantian:
+3. Gunakan HANYA 5 tipe animasi dinamis berikut secara bergantian (WAJIB sertakan 2-3 kali tipe "roto_typo" pada momen tokoh/subjek utama agar teks raksasa muncul di belakang tubuh subjek):
   - "kinetic_typo": Tipografi parallax besar tanpa kotak dengan kicker atas. Format: {{"type":"kinetic_typo", "trigger":"...", "kicker":"KONTEKS SINGKAT", "lines":["BARIS UTAMA", "*KATA KUNCI"]}} (awalan * pada baris kedua otomatis diberi efek stabilo).
   - "marker_quote": Kutipan/fakta tajam dengan garis vertikal menyala & stabilo berjalan. Format: {{"type":"marker_quote", "trigger":"...", "badge":"FAKTA LAPANGAN", "text":"KALIMAT FAKTA SINGKAT"}}
   - "floating_card": Kartu mengambang 3D dengan kilau cahaya untuk angka/bukti penting. Format: {{"type":"floating_card", "trigger":"...", "badge":"SOROTAN DATA", "value":"ANGKA/INTI SINGKAT", "label":"KETERANGAN SINGKAT"}}
@@ -1063,6 +1064,27 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         print(f"[peringatan] Latar kaca buram dilewati: {str(e)[:200]}")
 
     conc = str(max(2, min(4, os.cpu_count() or 2)))
+
+    # --- Ekstraksi layer rotoscoping subjek untuk overlay bertipe roto_typo ---
+    for idx_ov, o in enumerate(ovs):
+        if o.get("type") == "roto_typo":
+            seg_dur = max(0.4, o["t1"] - o["t0"])
+            seg_mp4 = os.path.join(work_dir, f"roto_in_{idx_ov}.mp4")
+            roto_name = f"roto_{idx_ov}.webm"
+            roto_out = os.path.join(remo_dir, "public", roto_name)
+            try:
+                sh([
+                    "ffmpeg", "-y", "-v", "error",
+                    "-ss", f"{o['t0']:.3f}", "-t", f"{seg_dur:.3f}",
+                    "-i", base_mp4, "-an",
+                    "-c:v", "libx264", "-crf", "18", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    seg_mp4,
+                ])
+                if extract_roto_layer(seg_mp4, roto_out, fps=FPS):
+                    o["rotoSrc"] = roto_name
+                    print(f"[roto] Layer subjek aktif untuk overlay #{idx_ov + 1}: {roto_name}")
+            except Exception as e:
+                print(f"[roto] Gagal pada overlay #{idx_ov + 1}, fallback ke teks biasa: {str(e)[:120]}")
 
     def render_overlay(glass):
         props = {"overlays": ovs, "fps": FPS, "durationInFrames": n_frames, "images": [], "captions": caps, "theme": t_props, "glassSrc": glass}
