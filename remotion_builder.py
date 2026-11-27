@@ -1,3 +1,4 @@
+import subprocess
 import os
 
 IS_LONG = os.environ.get("VIDEO_MODE", "").strip().upper() == "LONG"
