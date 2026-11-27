@@ -31,7 +31,7 @@ FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
 OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
 SKIP_PREFIXES = ("output_", "short_", "long_")
-ALLOWED_OVERLAY_TYPES = {"big", "lower", "stat", "list", "icon", "qmark", "quote", "solid"}
+ALLOWED_OVERLAY_TYPES = {"kinetic_typo", "marker_quote", "floating_card", "camera_beat"}
 TARGET_LUFS = -16.0
 
 THEMES = {
@@ -43,11 +43,10 @@ THEMES = {
 }
 
 DEFAULT_STYLE_NOTE = (
-    "Format video panjang landscape 16:9 dokumenter budaya Suku Baduy yang tenang dan informatif. "
-    "Susun 15-25 overlay berjarak rapi, kombinasikan big, lower, stat, dan list. Batasi icon maksimal 3 kali."
+    "Format video panjang landscape 16:9 dokumenter budaya yang dinamis dan hidup."
+    "Susun 15-25 overlay berjarak rapi menggunakan kombinasi kinetic_typo, marker_quote, floating_card, dan camera_beat."
     if IS_LONG else
-    "Gunakan kombinasi dinamis big, lower, stat, dan list untuk konten dokumenter Suku Baduy. "
-    "Batasi overlay tipe icon maksimal 2-3 kali saja agar tidak monoton."
+    "Gunakan variasi dinamis kinetic_typo, marker_quote, floating_card, dan camera_beat agar layar selalu hidup dan organik."
 )
 
 _WHISPER_CACHE = {}
@@ -405,53 +404,58 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
 # Overlay
 # ----------------------------------------------------------------------------
 def _normalize_overlay_type(o: dict) -> dict:
-    """Konversi defensif overlay lama bertipe 'map' menjadi 'big'/'lower' (teks saja, tanpa koordinat/pin)."""
-    if o.get("type") != "map":
+    """Konversi defensif tipe lama (big/lower/stat/list/icon/qmark/map) ke 4 tipe animasi baru."""
+    t = str(o.get("type") or "").strip().lower()
+    if t in ALLOWED_OVERLAY_TYPES:
         return o
-    txt = str(o.get("label") or o.get("sub") or o.get("text") or "").strip()
-    o.pop("pin", None)
-    o.pop("zoom", None)
-    o.pop("sub", None)
-    o.pop("label", None)
-    if txt and len(txt.split()) <= 3 and len(txt) <= 24:
-        o["type"] = "big"
-        o["lines"] = [txt.upper()]
-    else:
-        o["type"] = "lower"
-        o["badge"] = o.get("badge") or "CATATAN BUDAYA"
-        o["text"] = (txt or "WILAYAH ADAT").upper()
+
+    # Konversi list lama menjadi floating_card ringkas
+    if t == "list":
+        items = o.get("items") or []
+        first_txt = str(items[0].get("text") if items and isinstance(items[0], dict) else "").strip()
+        o["type"] = "floating_card"
+        o["badge"] = str(o.get("title") or "POIN UTAMA").upper()
+        o["value"] = (first_txt or "FAKTA PENTING").upper()
+        o["label"] = f"{len(items)} POIN SOROTAN" if len(items) > 1 else ""
+        return o
+
+    if t == "stat":
+        o["type"] = "floating_card"
+        o["badge"] = str(o.get("badge") or "SOROTAN DATA").upper()
+        return o
+
+    if t in ("icon", "map"):
+        txt = str(o.get("label") or o.get("text") or o.get("sub") or "FOKUS").strip().upper()
+        o["type"] = "camera_beat"
+        o["label"] = txt[:26]
+        return o
+
+    if t in ("lower", "quote"):
+        o["type"] = "marker_quote"
+        return o
+
+    # big, qmark, solid -> kinetic_typo
+    if t == "qmark" and o.get("label"):
+        o["lines"] = [f"*{str(o['label']).upper()}?"]
+    o["type"] = "kinetic_typo"
     return o
 
 
 def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float) -> list:
-    default_dur = {"lower": 2.8 if IS_LONG else 2.4, "icon": 3.2, "qmark": 2.4, "big": 2.8, "solid": 3.2, "stat": 3.6, "quote": 4.2, "list": 4.2, "produk": 4.0}
+    default_dur = {
+        "kinetic_typo": 2.8 if IS_LONG else 2.3,
+        "marker_quote": 3.2 if IS_LONG else 2.6,
+        "floating_card": 3.4 if IS_LONG else 2.8,
+        "camera_beat": 2.4 if IS_LONG else 2.0,
+    }
     ovs = []
-    extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.4 if IS_LONG else 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
+    extra = [{"type": "kinetic_typo", "at": 0.15, "lines": hook_lines, "dur": 2.4 if IS_LONG else 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
     if cta_text:
-        extra.append({"type": "big", "at": max(0.0, dur - 2.8), "lines": [cta_text], "dur": 2.6, "sfx": "hit", "_fixed": True})
+        extra.append({"type": "kinetic_typo", "at": max(0.0, dur - 2.8), "lines": [cta_text], "dur": 2.6, "sfx": "hit", "_fixed": True})
 
     for o in extra + overlays:
         o = _normalize_overlay_type(json.loads(json.dumps(o)))
-        if o.get("type") in ("list", "quote"):
-            items = o.get("items", [])
-            if not items:
-                continue
-            ok = True
-            parent_idx = find_trigger(words, o.get("trigger", ""))
-            for idx_it, it in enumerate(items):
-                trig = it.get("trigger") or o.get("trigger", "")
-                i = find_trigger(words, trig)
-                if i is not None:
-                    it["abs"] = words[i]["t0"] + (idx_it * 0.65 if "trigger" not in it else 0.0)
-                elif parent_idx is not None:
-                    it["abs"] = words[parent_idx]["t0"] + (idx_it * 0.65)
-                else:
-                    ok = False
-                    break
-            if not ok:
-                continue
-            o["t0"] = max(0.0, items[0]["abs"] - 0.15)
-        elif "at" in o:
+        if "at" in o:
             o["t0"] = o["at"] if o["at"] >= 0 else max(dur + o["at"], 0)
         else:
             i = find_trigger(words, o.get("trigger", ""))
@@ -462,7 +466,32 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
             continue
         ovs.append(o)
 
-    prio = {"stat": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3}
+    prio = {"floating_card": 0, "marker_quote": 1, "kinetic_typo": 2, "camera_beat": 3}
+
+    def _span(o):
+        return o["t0"], o["t0"] + o.get("dur", default_dur.get(o["type"], 2.6))
+
+    def _clash(a, b):
+        (a0, a1), (b0, b1) = _span(a), _span(b)
+        return a0 < b1 + OVERLAY_MIN_GAP and b0 < a1 + OVERLAY_MIN_GAP
+
+    kept = [o for o in ovs if o.get("_fixed")]
+    for o in sorted((o for o in ovs if not o.get("_fixed")), key=lambda o: (prio.get(o["type"], 2), o["t0"])):
+        if len(kept) >= OVERLAY_MAX:
+            print(f"[overlay] dilewati (melebihi batas {OVERLAY_MAX}): {o['type']} @ {o['t0']:.1f}s")
+            continue
+        if any(_clash(o, k) for k in kept):
+            print(f"[overlay] dilewati (terlalu rapat, jeda < {OVERLAY_MIN_GAP:.0f}s): {o['type']} @ {o['t0']:.1f}s")
+            continue
+        kept.append(o)
+    ovs = kept
+
+    ovs.sort(key=lambda o: o["t0"])
+    for k, o in enumerate(ovs):
+        o.pop("_fixed", None)
+        nxt = ovs[k + 1]["t0"] - 0.1 if k + 1 < len(ovs) else dur
+        o["t1"] = max(min(o["t0"] + o.get("dur", default_dur.get(o["type"], 2.6)), nxt, dur), o["t0"] + 0.3)
+    return ovs
 
     def _span(o):
         return o["t0"], o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8))
@@ -534,8 +563,9 @@ def run_auto_director(client: anthropic.Anthropic, text: str, style_note: str, p
     target_ov = "15 sampai 25 item" if IS_LONG else "6 sampai 8 item"
     fmt_label = "YouTube dokumenter layar lebar 16:9" if IS_LONG else "YouTube Shorts dokumenter Indonesia"
 
-    dir_prompt = f"""Kamu adalah sutradara motion graphic {fmt_label}.
-Baca transkrip narasi VO berikut dan susun rencana visual overlay yang tajam, padat, bervariasi, dan sinkron dengan kalimat narasi.
+    dir_prompt = f"""Kamu adalah sutradara motion graphic editorial {fmt_label}.
+Baca transkrip narasi VO berikut dan susun rencana animasi visual yang dinamis, organik, berlapis, dan sinkron dengan ritme narasi.
+DILARANG membuat kartu daftar statis atau ikon kaku.
 
 TRANSKRIP:
 {text}
@@ -545,17 +575,15 @@ CATATAN GAYA & PROYEK:
 
 ATURAN WAJIB:
 1. Pilih "theme" paling cocok dari: "api", "hutan", "bumi", "laut", "malam".
-2. Buat {target_ov} di array "overlays" (tiap overlay berjarak minimal ~10 detik dari yang lain). Pilih momen penekanan paling strategis. Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
-3. Variasikan "type" overlay (utamakan "big", "lower", "stat", dan "list"; JANGAN gunakan tipe "map"):
-  - "big": {{"type":"big", "trigger":"...", "lines":["BARIS 1", "BARIS 2"]}} (maks 2-3 baris pendek, kapitals)
-  - "lower": {{"type":"lower", "trigger":"...", "badge":"CATATAN BUDAYA", "text":"TEKS SINGKAT"}}
-  - "stat": {{"type":"stat", "trigger":"...", "value":"ANGKA/KUTIPAN SINGKAT", "label":"KETERANGAN SINGKAT"}}
-  - "list": {{"type":"list", "trigger":"...", "title":"JUDUL DAFTAR", "items":[{{"text":"POIN 1"}}, {{"text":"POIN 2"}}, {{"text":"POIN 3"}}]}}
-  - "icon": {{"type":"icon", "trigger":"...", "icon":"api|bahaya|fakta|berita|waktu|silang|centang", "label":"LABEL SINGKAT"}}
-  - "qmark": {{"type":"qmark", "trigger":"...", "label":"PERTANYAAN SINGKAT?"}}
-4. Semua teks di dalam overlay HARUS singkat (maksimal 3-6 kata per baris/item) dan menggunakan huruf KAPITAL.
+2. Buat {target_ov} di array "overlays" (tiap overlay berjarak minimal ~7 detik dari yang lain). Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
+3. Gunakan HANYA 4 tipe animasi dinamis berikut secara bergantian:
+  - "kinetic_typo": Tipografi parallax besar tanpa kotak dengan kicker atas. Format: {{"type":"kinetic_typo", "trigger":"...", "kicker":"KONTEKS SINGKAT", "lines":["BARIS UTAMA", "*KATA KUNCI"]}} (awalan * pada baris kedua otomatis diberi efek stabilo).
+  - "marker_quote": Kutipan/fakta tajam dengan garis vertikal menyala & stabilo berjalan. Format: {{"type":"marker_quote", "trigger":"...", "badge":"FAKTA LAPANGAN", "text":"KALIMAT FAKTA SINGKAT"}}
+  - "floating_card": Kartu mengambang 3D dengan kilau cahaya untuk angka/bukti penting. Format: {{"type":"floating_card", "trigger":"...", "badge":"SOROTAN DATA", "value":"ANGKA/INTI SINGKAT", "label":"KETERANGAN SINGKAT"}}
+  - "camera_beat": Bingkai viewfinder sinematik & pulse fokus langsung di atas B-roll tanpa menutupi gambar. Format: {{"type":"camera_beat", "trigger":"...", "label":"LOKASI / MOMEN"}}
+4. Semua teks di dalam overlay HARUS singkat (maksimal 3-6 kata) dan menggunakan huruf KAPITAL.
 5. Keluarkan HANYA JSON valid tanpa markdown ```json atau penjelasan lain dengan struktur:
-{{"theme":"...","topic":"...","hook_lines":["...","..."],"keywords":["KATA1","KATA2","KATA3","KATA4","KATA5"],"overlays":[...]}}"""
+{{"theme":"...","topic":"...","hook_lines":["...","*..."],"keywords":["KATA1","KATA2","KATA3","KATA4","KATA5"],"overlays":[...]}}"""
 
     last_err = None
     for attempt in range(1, 4):
