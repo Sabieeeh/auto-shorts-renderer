@@ -31,7 +31,7 @@ FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
 OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
 SKIP_PREFIXES = ("output_", "short_", "long_")
-ALLOWED_OVERLAY_TYPES = {"big", "lower", "stat", "list", "icon", "qmark", "quote", "solid"}
+ALLOWED_OVERLAY_TYPES = {"big", "lower", "stat", "stat_callout", "list", "icon", "qmark", "quote", "solid"}
 TARGET_LUFS = -16.0
 
 THEMES = {
@@ -141,36 +141,10 @@ def prepare_still_clips(clips: list, work_dir: str) -> list:
     return clips
 
 
-def cut_kind(i: int) -> str:
-    return "zoom" if i % 2 == 0 else "whip"
-
-
-def motion_filter(fr: int, drift: float, kin, kout) -> str:
-    n = CUT_FRAMES
-    terms = []
-    if drift:
-        terms.append(f"{drift}*on/{max(fr - 1, 1)}")
-    xs, blurs = [], []
-    if kout:
-        pr = f"max(0,(on-({fr}-{n}))/{n})"
-        terms.append(f"{0.22 if kout == 'zoom' else 0.26}*pow({pr},2)")
-        if kout == "whip":
-            xs.append(f"+0.075*iw*pow({pr},2)")
-            blurs.append(f"gblur=sigma=28:sigmaV=0.01:enable='gt(n,{fr - n - 1})'")
-        else:
-            blurs.append(f"gblur=sigma=10:enable='gt(n,{fr - n - 1})'")
-    if kin:
-        pr = f"max(0,({n}-on)/{n})"
-        terms.append(f"{0.22 if kin == 'zoom' else 0.26}*pow({pr},2)")
-        if kin == "whip":
-            xs.append(f"-0.075*iw*pow({pr},2)")
-            blurs.append(f"gblur=sigma=28:sigmaV=0.01:enable='lt(n,{n})'")
-        else:
-            blurs.append(f"gblur=sigma=10:enable='lt(n,{n})'")
-    z = "1+" + "+".join(terms) if terms else "1"
-    x = "iw/2-(iw/zoom/2)" + "".join(xs)
-    zp = f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}"
-    return ",".join([zp] + blurs)
+def shot_zoom_filter(fr: int) -> str:
+    """Zoom-in halus 1.00 -> 1.03 tanpa hentakan, tanpa blur transisi."""
+    z = f"1+0.03*on/{max(fr - 1, 1)}"
+    return f"zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}"
 
 
 def measure(path: str):
@@ -347,16 +321,25 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
                 cur = []
         if cur:
             groups.append(cur)
-        # Gabungkan grup berisi 1 kata ke tetangganya (versi lama membuangnya sehingga kata hilang dari caption)
+        # Gabungkan grup pendek/1 kata ke tetangga agar tidak ada subtitel yatim
         merged = []
         for g in groups:
-            if len(g) == 1 and merged:
+            if merged and (len(g) <= 1 or len(" ".join(x["w"] for x in g)) <= 4):
                 merged[-1].extend(g)
+            elif len(g) <= 1 and not merged:
+                merged.append(list(g))
             else:
                 merged.append(list(g))
-        if len(merged) > 1 and len(merged[0]) == 1:
+        if len(merged) > 1 and (len(merged[0]) <= 1 or len(" ".join(x["w"] for x in merged[0])) <= 4):
             merged[1] = merged[0] + merged[1]
             merged.pop(0)
+        i = 1
+        while i < len(merged):
+            if len(merged[i]) <= 1 or len(" ".join(x["w"] for x in merged[i])) <= 4:
+                merged[i - 1].extend(merged[i])
+                merged.pop(i)
+            else:
+                i += 1
         return merged
 
     def break2(ws):
@@ -404,27 +387,114 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
 # ----------------------------------------------------------------------------
 # Overlay
 # ----------------------------------------------------------------------------
+def _transcript_number_tokens(text: str) -> set:
+    nums = set()
+    for m in re.findall(r"\d+(?:[\.,]\d+)?%?", str(text or "")):
+        nums.add(m.replace(" ", ""))
+        nums.add(m.replace(",", "."))
+        nums.add(m.replace(".", ","))
+    return {n for n in nums if n}
+
+
+def _overlay_has_hallucinated_stat(o: dict, transcript_nums: set) -> bool:
+    t = o.get("type")
+    if t not in ("stat", "stat_callout"):
+        return False
+    value = str(o.get("value") or o.get("text") or (o.get("lines") or [""])[0] or "")
+    value_nums = re.findall(r"\d+(?:[\.,]\d+)?%?", value)
+    if not value_nums:
+        return False
+    for n in value_nums:
+        variants = {n, n.replace(",", "."), n.replace(".", ",")}
+        if not (variants & transcript_nums):
+            return True
+    return False
+
+
+def _clean_overlay_text(s: str, max_words: int = 8, max_chars: int = 56) -> str:
+    txt = re.sub(r"\s+", " ", str(s or "")).strip(" -:;,.")
+    if not txt:
+        return ""
+    words = txt.split()
+    if len(words) > max_words:
+        txt = " ".join(words[:max_words]).strip(" -:;,.")
+    if len(txt) > max_chars:
+        cut = txt[:max_chars].rstrip()
+        i = cut.rfind(" ")
+        txt = (cut[:i] if i > 8 else cut).strip(" -:;,.")
+    return txt
+
+
 def _normalize_overlay_type(o: dict) -> dict:
-    """Konversi defensif overlay lama bertipe 'map' menjadi 'big'/'lower' (teks saja, tanpa koordinat/pin)."""
-    if o.get("type") != "map":
-        return o
-    txt = str(o.get("label") or o.get("sub") or o.get("text") or "").strip()
-    o.pop("pin", None)
-    o.pop("zoom", None)
-    o.pop("sub", None)
-    o.pop("label", None)
-    if txt and len(txt.split()) <= 3 and len(txt) <= 24:
-        o["type"] = "big"
-        o["lines"] = [txt.upper()]
-    else:
-        o["type"] = "lower"
-        o["badge"] = o.get("badge") or "CATATAN BUDAYA"
-        o["text"] = (txt or "WILAYAH ADAT").upper()
+    """Normalisasi tipe lama/alias dan bersihkan teks overlay agar tidak terpotong."""
+    if o.get("type") == "stat_callout":
+        o["type"] = "stat"
+    if o.get("type") == "map":
+        txt = str(o.get("label") or o.get("sub") or o.get("text") or "").strip()
+        o.pop("pin", None)
+        o.pop("zoom", None)
+        o.pop("sub", None)
+        o.pop("label", None)
+        if txt and len(txt.split()) <= 3 and len(txt) <= 24:
+            o["type"] = "big"
+            o["lines"] = [txt.upper()]
+        else:
+            o["type"] = "lower"
+            o["badge"] = o.get("badge") or "CATATAN BUDAYA"
+            o["text"] = (txt or "WILAYAH ADAT").upper()
+
+    t = o.get("type")
+    if t == "big":
+        lines = []
+        for l in (o.get("lines") or [])[:3]:
+            cl = _clean_overlay_text(l, max_words=5, max_chars=28).upper()
+            if cl:
+                lines.append(cl)
+        if not lines and o.get("text"):
+            cl = _clean_overlay_text(o["text"], max_words=5, max_chars=28).upper()
+            if cl:
+                lines = [cl]
+        o["lines"] = lines
+    elif t == "lower":
+        o["badge"] = _clean_overlay_text(o.get("badge") or "CATATAN BUDAYA", max_words=3, max_chars=24).upper()
+        o["text"] = _clean_overlay_text(o.get("text") or "", max_words=6, max_chars=42).upper()
+    elif t == "stat":
+        o["value"] = _clean_overlay_text(o.get("value") or o.get("text") or "", max_words=4, max_chars=24).upper()
+        o["label"] = _clean_overlay_text(o.get("label") or "", max_words=6, max_chars=42).upper()
+    elif t in ("list", "quote"):
+        o["title"] = _clean_overlay_text(o.get("title") or "RINGKASAN FAKTA", max_words=4, max_chars=28).upper()
+        items = []
+        for it in (o.get("items") or [])[:4]:
+            if isinstance(it, dict):
+                txt = _clean_overlay_text(it.get("text") or "", max_words=6, max_chars=38).upper()
+                if txt:
+                    nit = dict(it)
+                    nit["text"] = txt
+                    items.append(nit)
+            else:
+                txt = _clean_overlay_text(it, max_words=6, max_chars=38).upper()
+                if txt:
+                    items.append({"text": txt})
+        o["items"] = items
+    elif t == "icon":
+        o["label"] = _clean_overlay_text(o.get("label") or "", max_words=4, max_chars=30).upper()
+    elif t == "qmark":
+        o["label"] = _clean_overlay_text(o.get("label") or "", max_words=6, max_chars=42).upper()
+        if o["label"] and not o["label"].endswith("?"):
+            o["label"] += "?"
+    elif t == "solid":
+        lines = []
+        for l in (o.get("lines") or [])[:3]:
+            cl = _clean_overlay_text(l, max_words=5, max_chars=30).upper()
+            if cl:
+                lines.append(cl)
+        o["lines"] = lines
     return o
 
 
-def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float) -> list:
+def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float, transcript_text: str = "") -> list:
     default_dur = {"lower": 2.8 if IS_LONG else 2.4, "icon": 3.2, "qmark": 2.4, "big": 2.8, "solid": 3.2, "stat": 3.6, "quote": 4.2, "list": 4.2, "produk": 4.0}
+    transcript_nums = _transcript_number_tokens(transcript_text or " ".join(w.get("w", "") for w in words))
     ovs = []
     extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.4 if IS_LONG else 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
     if cta_text:
@@ -432,6 +502,9 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
 
     for o in extra + overlays:
         o = _normalize_overlay_type(json.loads(json.dumps(o)))
+        if _overlay_has_hallucinated_stat(o, transcript_nums):
+            print(f"[overlay] dilewati (stat/angka tidak ada di transkrip): {o.get('value','')!r}")
+            continue
         if o.get("type") in ("list", "quote"):
             items = o.get("items", [])
             if not items:
@@ -506,14 +579,31 @@ def _parse_json_loose(txt: str) -> dict:
     return json.loads(txt[a:b + 1])
 
 
-def _sanitize_plan(p: dict) -> dict:
+def _sanitize_plan(p: dict, transcript_text: str = "") -> dict:
     if not isinstance(p, dict):
         raise ValueError("Rencana bukan objek JSON")
+    transcript_nums = _transcript_number_tokens(transcript_text)
     ovs = []
     for o in p.get("overlays") or []:
         if not isinstance(o, dict) or o.get("type") not in ALLOWED_OVERLAY_TYPES:
             continue
-        if o.get("type") in ("list", "quote") or o.get("trigger"):
+        o = _normalize_overlay_type(dict(o))
+        if _overlay_has_hallucinated_stat(o, transcript_nums):
+            print(f"[plan] stat dibuang (angka tidak ada di transkrip): {o.get('value','')!r}")
+            continue
+        if o.get("type") in ("list", "quote"):
+            if o.get("items"):
+                ovs.append(o)
+            continue
+        if o.get("trigger"):
+            if o.get("type") == "big" and not o.get("lines"):
+                continue
+            if o.get("type") == "lower" and not o.get("text"):
+                continue
+            if o.get("type") == "stat" and not o.get("value"):
+                continue
+            if o.get("type") in ("icon", "qmark") and not o.get("label"):
+                continue
             ovs.append(o)
     if not ovs:
         raise ValueError("Tidak ada overlay valid dalam rencana")
@@ -549,11 +639,11 @@ ATURAN WAJIB:
 3. Variasikan "type" overlay (utamakan "big", "lower", "stat", dan "list"; JANGAN gunakan tipe "map"):
   - "big": {{"type":"big", "trigger":"...", "lines":["BARIS 1", "BARIS 2"]}} (maks 2-3 baris pendek, kapitals)
   - "lower": {{"type":"lower", "trigger":"...", "badge":"CATATAN BUDAYA", "text":"TEKS SINGKAT"}}
-  - "stat": {{"type":"stat", "trigger":"...", "value":"ANGKA/KUTIPAN SINGKAT", "label":"KETERANGAN SINGKAT"}}
+  - "stat": {{"type":"stat", "trigger":"...", "value":"ANGKA/KUTIPAN SINGKAT", "label":"KETERANGAN SINGKAT"}} (HANYA jika angka/persentase tertulis eksplisit di transkrip; jika tidak ada angka, jangan pakai stat)
   - "list": {{"type":"list", "trigger":"...", "title":"JUDUL DAFTAR", "items":[{{"text":"POIN 1"}}, {{"text":"POIN 2"}}, {{"text":"POIN 3"}}]}}
   - "icon": {{"type":"icon", "trigger":"...", "icon":"api|bahaya|fakta|berita|waktu|silang|centang", "label":"LABEL SINGKAT"}}
   - "qmark": {{"type":"qmark", "trigger":"...", "label":"PERTANYAAN SINGKAT?"}}
-4. Semua teks di dalam overlay HARUS singkat (maksimal 3-6 kata per baris/item) dan menggunakan huruf KAPITAL.
+4. Semua teks di dalam overlay HARUS singkat (maksimal 3-6 kata per baris/item) dan menggunakan huruf KAPITAL. Jangan pernah memotong kalimat di tengah; gunakan frasa utuh yang ringkas.
 5. Keluarkan HANYA JSON valid tanpa markdown ```json atau penjelasan lain dengan struktur:
 {{"theme":"...","topic":"...","hook_lines":["...","..."],"keywords":["KATA1","KATA2","KATA3","KATA4","KATA5"],"overlays":[...]}}"""
 
@@ -565,7 +655,7 @@ ATURAN WAJIB:
                 max_tokens=4096,
                 messages=[{"role": "user", "content": dir_prompt}],
             )
-            return _sanitize_plan(_parse_json_loose(_extract_claude_text(resp)))
+            return _sanitize_plan(_parse_json_loose(_extract_claude_text(resp)), transcript_text=text)
         except Exception as e:
             last_err = e
             print(f"(!) Auto Director percobaan {attempt}/3 gagal: {str(e)[:180]}")
@@ -833,7 +923,8 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     excluded = {x.lower() for x in state.get("excluded_clips", [])}
 
     caps = build_captions(words, units, keywords, dur)
-    ovs = lock_overlays(words, overlays_raw, hook_lines, cta_text, dur)
+    transcript_text = state.get("text") or " ".join(w.get("w", "") for w in words)
+    ovs = lock_overlays(words, overlays_raw, hook_lines, cta_text, dur, transcript_text=transcript_text)
     sfx_ev = sorted({round(o["t0"], 2) for o in ovs if o.get("sfx")})
 
     clips = [
@@ -843,18 +934,41 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     assert clips, "Tidak ada klip B-roll tersisa untuk dirender!"
     clips = prepare_still_clips(clips, work_dir)
 
-    hook_cut = 2.2 if IS_LONG else 1.4
-    body_cut = 4.2 if IS_LONG else 2.4
-    hook_window = 5.0 if IS_LONG else 3.0
     grade = "eq=contrast=1.04:saturation=1.05:gamma_r=1.03:gamma_b=0.96,colorbalance=rm=0.03:bm=-0.03"
+    # Hard cut di batas kalimat/jeda Whisper. Tiap klip 3.5-5.5s saat narasi berlanjut.
+    unit_bounds = sorted({
+        max(0.0, min(dur, float(words[a]["t0"])))
+        for a, b in units if b > a
+    } | {0.0, float(dur)})
     cut_ts = [0.0]
     while cut_ts[-1] < dur - 0.01:
-        step = hook_cut if cut_ts[-1] < hook_window else body_cut
-        if dur - (cut_ts[-1] + step) < 1.5:
-            step = dur - cut_ts[-1]
-        cut_ts.append(min(cut_ts[-1] + step, dur))
+        cur = cut_ts[-1]
+        rem = dur - cur
+        if rem <= 5.8:
+            cut_ts.append(dur)
+            break
+        window_end = cur + 5.5
+        cands = [t for t in unit_bounds if cur + 3.5 <= t <= window_end]
+        if cands:
+            nxt = max(cands)
+        else:
+            after = [t for t in unit_bounds if t > window_end]
+            nxt = min(after[0], cur + 5.5) if after else min(cur + 4.5, dur)
+        if nxt - cur < 1.5:
+            nxt = min(cur + 3.5, dur)
+        if dur - nxt < 3.5 and nxt < dur:
+            nxt = dur
+        cut_ts.append(min(nxt, dur))
     bounds = [round(t * FPS) for t in cut_ts]
     bounds[-1] = n_frames
+    # dedup bounds
+    dedup = [bounds[0]]
+    for bnd in bounds[1:]:
+        if bnd > dedup[-1]:
+            dedup.append(bnd)
+    if dedup[-1] != n_frames:
+        dedup.append(n_frames)
+    bounds = dedup
     n_sh = len(bounds) - 1
 
     used = {c["key"]: [] for c in clips}
@@ -917,47 +1031,42 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     def render_shot(s):
         c, fr = s["clip"], s["frames"]
         out_p = os.path.join(shots_dir, f"s{s['i']:03d}.mp4")
-        kin = cut_kind(s["i"] - 1) if s["i"] > 0 else None
-        kout = cut_kind(s["i"]) if s["i"] < n_sh - 1 else None
-        still = bool(c.get("still"))
-        drift = 0.0 if still else DRIFT
         pre = ["-stream_loop", "-1"] if s["loop"] else []
         if c["is_img"]:
             pre = ["-loop", "1"]
         base = ["ffmpeg", "-y", "-v", "error"] + pre + ["-ss", f"{s['ss']:.3f}", "-t", f"{s['dur'] + 0.4:.3f}", "-i", c["path"], "-an"]
         out = ["-frames:v", str(fr), "-r", "30", "-c:v", "libx264", "-crf", "16", "-preset", "ultrafast", "-pix_fmt", "yuv420p", out_p]
+        zp = shot_zoom_filter(fr)
         if IS_LONG:
-            g = "" if still else f"{grade},"
-            if c.get("vertical", False) and not still:
+            if c.get("vertical", False):
                 fc = (
                     f"[0:v]fps=30,{grade},split=2[a][b];"
                     f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=35:6,eq=brightness=-0.12[bg];"
                     f"[b]scale=-2:{H}:flags=lanczos[fg];"
-                    f"[bg][fg]overlay=x='(W-w)/2':y='(H-h)/2',scale={scale_up_w}:{scale_up_h},{motion_filter(fr, drift, kin, kout)},format=yuv420p[v]"
+                    f"[bg][fg]overlay=x='(W-w)/2':y='(H-h)/2',scale={scale_up_w}:{scale_up_h},{zp},format=yuv420p[v]"
                 )
                 sh(base + ["-filter_complex", fc, "-map", "[v]"] + out)
             else:
                 vf = (
-                    f"fps=30,{g}scale={scale_up_w}:{scale_up_h}:force_original_aspect_ratio=increase,crop={scale_up_w}:{scale_up_h},"
-                    f"{motion_filter(fr, drift, kin, kout)},format=yuv420p"
+                    f"fps=30,{grade},scale={scale_up_w}:{scale_up_h}:force_original_aspect_ratio=increase,crop={scale_up_w}:{scale_up_h},"
+                    f"{zp},format=yuv420p"
                 )
                 sh(base + ["-vf", vf] + out)
         else:
             if c.get("vertical", True):
-                g = "" if still else f"{grade},"
                 vf = (
-                    f"fps=30,{g}scale=1620:2880:force_original_aspect_ratio=increase,crop=1620:2880,"
-                    f"{motion_filter(fr, drift, kin, kout)},format=yuv420p"
+                    f"fps=30,{grade},scale=1620:2880:force_original_aspect_ratio=increase,crop=1620:2880,"
+                    f"{zp},format=yuv420p"
                 )
                 sh(base + ["-vf", vf] + out)
             else:
-                zp = f"zoompan=z='1+{DRIFT}*on/{max(fr - 1, 1)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=880x495:fps=30"
+                inner_zp = f"zoompan=z='1+0.03*on/{max(fr - 1, 1)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=880x495:fps=30"
                 fc = (
                     f"[0:v]fps=30,{grade},split=2[a][b];"
                     f"[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=40:6,eq=brightness=-0.12[bg];"
-                    f"[b]scale=880:495:force_original_aspect_ratio=increase,crop=880:495,{zp}[fg];"
+                    f"[b]scale=880:495:force_original_aspect_ratio=increase,crop=880:495,{inner_zp}[fg];"
                     f"[bg][fg]overlay=100:433[t];[t][1:v]overlay=0:0:format=auto,format=yuv420p[v0];"
-                    f"[v0]scale=1620:2880,{motion_filter(fr, 0.0, kin, kout)},format=yuv420p[v]"
+                    f"[v0]scale=1620:2880,{zp},format=yuv420p[v]"
                 )
                 inp = base[:-1] + ["-loop", "1", "-i", phone_png, "-an"]
                 sh(inp + ["-filter_complex", fc, "-map", "[v]"] + out)
@@ -993,23 +1102,11 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         "hex": {"green": _hex(_t["g"]), "dark": _hex(_t["d"]), "mid": _hex(_t["m"]), "cream": _hex(_t["c"]), "orange": _hex(_t["a"]), "black": _hex(_t["k"])},
         "vars": {"--g": "%d,%d,%d" % _t["g"], "--d": "%d,%d,%d" % _t["d"], "--a": "%d,%d,%d" % _t["a"], "--c": "%d,%d,%d" % _t["c"], "--v": "%d,%d,%d" % _t["v"]},
     }
-    glass_src = None
-    try:
-        blur_p = f"{remo_dir}/public/base_blur.mp4"
-        bw, bh = (480, 270) if IS_LONG else (270, 480)
-        sh([
-            "ffmpeg", "-y", "-v", "error", "-i", base_mp4,
-            "-vf", f"scale={bw}:{bh}:flags=area,gblur=sigma=2.2,scale={W}:{H}:flags=bicubic,eq=brightness=-0.04",
-            "-an", "-c:v", "libx264", "-crf", "24", "-preset", "veryfast", "-g", "15", "-pix_fmt", "yuv420p", blur_p,
-        ])
-        glass_src = "base_blur.mp4"
-    except Exception as e:
-        print(f"[peringatan] Latar kaca buram dilewati: {str(e)[:200]}")
 
     conc = str(max(2, min(4, os.cpu_count() or 2)))
 
-    def render_overlay(glass):
-        props = {"overlays": ovs, "fps": FPS, "durationInFrames": n_frames, "images": [], "captions": caps, "theme": t_props, "glassSrc": glass}
+    def render_overlay():
+        props = {"overlays": ovs, "fps": FPS, "durationInFrames": n_frames, "images": [], "captions": caps, "theme": t_props}
         with open(f"{remo_dir}/props.json", "w") as fh:
             json.dump(props, fh, sort_keys=True)
         ov_file, codec = f"{remo_dir}/out/overlay.webm", "vp9"
@@ -1024,13 +1121,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
                 "--prores-profile=4444", "--pixel-format=yuva444p10le", "--image-format=png", "--overwrite", f"--concurrency={conc}"], cwd=remo_dir)
         return ov_file, codec
 
-    try:
-        overlay_file, used_codec = render_overlay(glass_src)
-    except Exception as e:
-        if glass_src is None:
-            raise
-        print(f"[peringatan] Render dengan latar kaca gagal ({str(e)[-300:]}); mengulang tanpa latar kaca...")
-        overlay_file, used_codec = render_overlay(None)
+    overlay_file, used_codec = render_overlay()
 
     # --- SFX + mix audio ---
     SR = 48000

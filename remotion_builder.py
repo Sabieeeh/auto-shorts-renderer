@@ -55,7 +55,7 @@ const DEFAULT_C = {
 };
 const ThemeCtx = createContext<any>(DEFAULT_C);
 const useC = () => useContext(ThemeCtx);
-const CfgCtx = createContext<any>({glass: null});
+const CfgCtx = createContext<any>({});
 
 const clamp: any = {extrapolateLeft: "clamp", extrapolateRight: "clamp"};
 const SPR = {damping: 18, stiffness: 220, mass: 0.7};
@@ -77,7 +77,7 @@ const clipWords = (s: string, n: number) => {
   return (i > 8 ? cut.slice(0, i) : cut).trim();
 };
 
-const SUB_SHADOW = "0 1px 2px rgba(0,0,0,0.55), 0 2px 10px rgba(0,0,0,0.35)";
+const SUB_SHADOW = "0 1px 1px rgba(0,0,0,0.95), 0 2px 4px rgba(0,0,0,0.85), 0 6px 18px rgba(0,0,0,0.65), 0 12px 36px rgba(0,0,0,0.45)";
 
 const fitSize = (txt: string, max: number, width: number) =>
   Math.max(24, Math.min(max, width / (Math.max(txt.length, 1) * 0.78)));
@@ -168,27 +168,13 @@ const Dim: React.FC<any> = ({dur}) => {
   );
 };
 
-const Glass: React.FC<any> = ({o, x, y, w, h, radius = 26, style = {}, children}) => {
-  const {glass} = useContext(CfgCtx);
-  const {fps, width, height} = useVideoConfig();
-  const from = Math.round(((o && o.t0) || 0) * fps);
+const Panel: React.FC<any> = ({x, y, w, h, style = {}, children}) => {
   return (
     <div style={{
-      position: "absolute", left: x, top: y, width: w, height: h, borderRadius: radius,
-      overflow: "hidden", boxSizing: "border-box",
-      background: "rgba(10,14,12,0.44)",
-      backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
-      border: "1px solid rgba(255,255,255,0.22)",
-      boxShadow: "0 2px 6px rgba(0,0,0,0.35), 0 18px 40px rgba(0,0,0,0.42), 0 44px 96px rgba(0,0,0,0.32)",
+      position: "absolute", left: x, top: y, width: w, height: h,
+      boxSizing: "border-box", background: "transparent", border: "none", boxShadow: "none",
       ...style,
-    } as any}>
-      {glass ? (
-        <div style={{position: "absolute", left: -x, top: -y, width, height}}>
-          <OffthreadVideo src={staticFile(glass)} startFrom={from} style={{width, height, objectFit: "cover"}} />
-        </div>
-      ) : null}
-      <div style={{position: "absolute", left: 0, top: 0, right: 0, bottom: 0, background: "linear-gradient(145deg, rgba(var(--d),.50) 0%, rgba(8,12,10,.60) 100%)"}} />
-      <div style={{position: "absolute", left: 0, right: 0, top: 0, height: 1, background: "linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent)"}} />
+    }}>
       {children}
     </div>
   );
@@ -270,27 +256,27 @@ const Lower: React.FC<any> = ({o, dur}) => {
   const gy = ZONE(isLand).bottom - gh;
   return (
     <Scene dur={dur} moving={false}>
-      <Glass o={o} x={gx} y={gy} w={gw} h={gh} style={{transform: `translateX(${(1 - s) * -80}px)`, opacity: Math.min(1, s * 1.6)}}>
+      <Panel x={gx} y={gy} w={gw} h={gh} style={{transform: `translateX(${(1 - s) * -80}px)`, opacity: Math.min(1, s * 1.6)}}>
         <div style={{position: "relative", padding: "22px 34px 26px 46px"}}>
           <div style={{
             position: "absolute", left: 22, top: 22, bottom: 26, width: 6, borderRadius: 3,
-            background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.25))`,
-            boxShadow: `0 0 16px rgba(var(--a),.6)`,
+            background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.35))`,
+            boxShadow: `0 0 18px rgba(var(--a),.45)`,
           }} />
           <Reveal delay={2}>
-            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 23, lineHeight: "28px", letterSpacing: 4, color: C.orange}}>{badge}</div>
+            <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 23, lineHeight: "28px", letterSpacing: 4, color: C.orange, textShadow: "0 2px 8px rgba(0,0,0,0.8), 0 6px 24px rgba(0,0,0,0.55)"}}>{badge}</div>
           </Reveal>
           <div style={{height: 8}} />
           {lines.map((l, i) => (
             <Reveal key={i} delay={6 + i * 4}>
-              <div style={{fontWeight: 800, fontSize: size, color: C.cream, lineHeight: `${lh}px`}}>
+              <div style={{fontWeight: 800, fontSize: size, color: C.cream, lineHeight: `${lh}px`, textShadow: "0 2px 6px rgba(0,0,0,0.85), 0 8px 30px rgba(0,0,0,0.65), 0 18px 48px rgba(0,0,0,0.45)"}}>
                 <MarkedText text={l} delay={14 + i * 4} color={C.orange} ink={C.black} />
               </div>
             </Reveal>
           ))}
         </div>
-        <div style={{position: "absolute", left: 0, bottom: 0, height: 4, width: `${prog}%`, background: `linear-gradient(90deg, ${C.orange}, ${C.cream})`}} />
-      </Glass>
+        <div style={{position: "absolute", left: 22, bottom: 0, height: 4, width: `${prog}%`, maxWidth: gw - 44, background: `linear-gradient(90deg, ${C.orange}, ${C.cream})`, boxShadow: "0 2px 10px rgba(0,0,0,0.5)"}} />
+      </Panel>
     </Scene>
   );
 };
@@ -369,20 +355,21 @@ const List: React.FC<any> = ({o, dur}) => {
   const gx = isLand ? 310 : 60;
   const gw = isLand ? 1300 : 960;
   const p = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR})));
+  const textShadow = "0 2px 6px rgba(0,0,0,0.85), 0 8px 28px rgba(0,0,0,0.6)";
   return (
     <>
       <Dim dur={dur} />
       <Scene dur={dur} moving={false}>
-        <Glass o={o} x={gx} y={top} w={gw} h={h} style={{transform: `translateY(${(1 - p) * 60}px)`, opacity: Math.min(1, p * 1.5)}}>
+        <Panel x={gx} y={top} w={gw} h={h} style={{transform: `translateY(${(1 - p) * 60}px)`, opacity: Math.min(1, p * 1.5)}}>
           <div style={{position: "absolute", left: 30, top: 24, bottom: 24, right: 34}}>
             <div style={{
               position: "absolute", left: 0, top: 2, height: 30, width: 6, borderRadius: 3,
-              background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.3))`,
-              boxShadow: "0 0 14px rgba(var(--a),.6)",
+              background: `linear-gradient(180deg, ${C.orange}, rgba(var(--a),.35))`,
+              boxShadow: "0 0 16px rgba(var(--a),.5)",
             }} />
-            <div style={{paddingLeft: 22, height: 44, boxSizing: "border-box", paddingBottom: 12, borderBottom: "1px solid rgba(255,255,255,0.14)"}}>
+            <div style={{paddingLeft: 22, height: 44, boxSizing: "border-box", paddingBottom: 12, borderBottom: "1px solid rgba(255,255,255,0.22)"}}>
               <Reveal delay={2}>
-                <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 24, letterSpacing: 4, color: C.orange, lineHeight: "30px", whiteSpace: "nowrap"}}>
+                <div style={{fontFamily: F_COND, fontWeight: 700, fontSize: 24, letterSpacing: 4, color: C.orange, lineHeight: "30px", whiteSpace: "nowrap", textShadow}}>
                   {up(o.title || "RINGKASAN FAKTA")}
                 </div>
               </Reveal>
@@ -398,17 +385,17 @@ const List: React.FC<any> = ({o, dur}) => {
                       minWidth: 42, height: 42, borderRadius: 12, background: C.orange, color: C.black,
                       display: "flex", alignItems: "center", justifyContent: "center",
                       fontFamily: F_DISPLAY, fontWeight: 800, fontSize: 22,
-                      transform: `scale(${q})`, boxShadow: "0 4px 14px rgba(var(--a),.5)",
+                      transform: `scale(${q})`, boxShadow: "0 4px 14px rgba(var(--a),.45), 0 2px 8px rgba(0,0,0,0.5)",
                     }}>{i + 1}</div>
                     <Reveal delay={st} style={{flex: 1}}>
-                      <div style={{fontWeight: 800, fontSize: fitSize(txt, isLand ? 34 : 38, isLand ? 1080 : 760), color: C.cream, lineHeight: 1.25, whiteSpace: "nowrap"}}>{txt}</div>
+                      <div style={{fontWeight: 800, fontSize: fitSize(txt, isLand ? 34 : 38, isLand ? 1080 : 760), color: C.cream, lineHeight: 1.25, whiteSpace: "nowrap", textShadow}}>{txt}</div>
                     </Reveal>
                   </div>
                 );
               })}
             </div>
           </div>
-        </Glass>
+        </Panel>
       </Scene>
     </>
   );
@@ -556,9 +543,8 @@ const Icon: React.FC<any> = ({o, dur}) => {
   const cy = iy + (isLand ? 200 : 225);
   return (
     <Scene dur={dur} moving={false}>
-      <Glass o={o} x={isLand ? 460 : 90} y={iy} w={isLand ? 1000 : 900} h={isLand ? 520 : 590} radius={34} style={{opacity: pIn, transform: `scale(${0.9 + 0.1 * pIn})`}} />
       <svg width={width} height={height} style={{position: "absolute", left: 0, top: 0}}>
-        <g transform={`translate(${cx} ${cy + floatY}) scale(${Math.max(0, pop)})`}>
+        <g transform={`translate(${cx} ${cy + floatY}) scale(${Math.max(0, pop)})`} opacity={pIn}>
           <IconArt name={o.icon} draw={draw} f={f} />
         </g>
         <circle cx={cx} cy={cy} r={95 + ring * 185} fill="none" stroke={C.orange}
@@ -566,7 +552,7 @@ const Icon: React.FC<any> = ({o, dur}) => {
       </svg>
       <div style={{position: "absolute", left: isLand ? 490 : 110, right: isLand ? 490 : 110, top: iy + (isLand ? 390 : 426), textAlign: "center"}}>
         <Reveal delay={10}>
-          <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 920 : 820), color: C.cream}}>{label}</div>
+          <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 920 : 820), color: C.cream, textShadow: "0 2px 6px rgba(0,0,0,0.85), 0 8px 30px rgba(0,0,0,0.65), 0 18px 48px rgba(0,0,0,0.45)"}}>{label}</div>
         </Reveal>
       </div>
     </Scene>
@@ -592,15 +578,13 @@ const QMark: React.FC<any> = ({o, dur}) => {
         fontSize: isLand ? 310 : 380, color: C.orange, lineHeight: 1,
         transform: `scale(${Math.max(0, s)}) rotate(${wob}deg)`,
         WebkitTextStroke: `8px ${C.black}`, paintOrder: "stroke fill",
-        textShadow: `0 0 ${glow}px rgba(var(--a),.7)`,
+        textShadow: `0 0 ${glow}px rgba(var(--a),.7), 0 10px 40px rgba(0,0,0,0.55)`,
       } as any}>?</div>
-      <Glass o={o} x={isLand ? 360 : 90} y={qTop + (isLand ? 380 : 470)} w={isLand ? 1200 : 900} radius={44} style={{opacity: pill, transform: `translateY(${(1 - pill) * 40}px)`}}>
-        <div style={{padding: "14px 40px 18px", textAlign: "center"}}>
-          <Reveal delay={8}>
-            <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 1100 : 800), color: C.cream, lineHeight: 1.25}}>{label}</div>
-          </Reveal>
-        </div>
-      </Glass>
+      <div style={{position: "absolute", left: isLand ? 360 : 90, top: qTop + (isLand ? 380 : 470), width: isLand ? 1200 : 900, opacity: pill, transform: `translateY(${(1 - pill) * 40}px)`, textAlign: "center"}}>
+        <Reveal delay={8}>
+          <div style={{fontWeight: 800, fontSize: fitSize(label, 40, isLand ? 1100 : 800), color: C.cream, lineHeight: 1.25, textShadow: "0 2px 6px rgba(0,0,0,0.85), 0 8px 30px rgba(0,0,0,0.65), 0 18px 48px rgba(0,0,0,0.45)"}}>{label}</div>
+        </Reveal>
+      </div>
     </Scene>
   );
 };
@@ -627,6 +611,11 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
   const lh = Math.round(fs * 1.3);
   return (
     <AbsoluteFill style={{fontFamily: F_DISPLAY, opacity: out * inn}}>
+      <div style={{
+        position: "absolute", left: 0, right: 0, bottom: 0, height: isLand ? 300 : 420,
+        background: "linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.18) 30%, rgba(0,0,0,0.42) 72%, rgba(0,0,0,0.56) 100%)",
+        pointerEvents: "none",
+      }} />
       <div style={{position: "absolute", left: "8%", width: "84%", bottom: height - ZONE(isLand).sub, display: "flex", justifyContent: "center"}}>
         <div style={{
           maxWidth: "100%", boxSizing: "border-box",
@@ -661,10 +650,10 @@ const REG: any = {
   icon: Icon, qmark: QMark, map: MapToText,
 };
 
-export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], captions = [], theme = null, glassSrc = null}) => {
+export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], captions = [], theme = null}) => {
   const C = useMemo(() => ({...DEFAULT_C, ...(theme && theme.hex ? theme.hex : {})}), [theme]);
   const vars: any = theme && theme.vars ? theme.vars : {};
-  const cfg = useMemo(() => ({glass: glassSrc}), [glassSrc]);
+  const cfg = useMemo(() => ({}), []);
   return (
     <ThemeCtx.Provider value={C}>
       <CfgCtx.Provider value={cfg}>
