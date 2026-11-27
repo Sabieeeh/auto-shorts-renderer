@@ -758,43 +758,41 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
     return clips
 
 
-def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, words: list, proj_dir: str, model: str = "claude-sonnet-4-6") -> dict:
-    label_tool = {
-        "name": "label_klip",
-        "description": "Deskripsi visual klip/gambar.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "deskripsi": {"type": "string"},
-                "tag": {"type": "array", "items": {"type": "string"}},
-                "ada_orang": {"type": "boolean"},
-                "wajah_jelas": {"type": "boolean"},
-            },
-            "required": ["deskripsi", "tag", "ada_orang", "wajah_jelas"],
-        },
-    }
-    match_tool = {
-        "name": "cocokkan_klip",
-        "description": "Pasangkan frasa narasi dengan klip B-roll.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pilihan": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "frasa": {"type": "string"},
-                            "id_klip": {"type": "string"},
-                        },
-                        "required": ["frasa", "id_klip"],
-                    },
+def _gemini_vision_label(frames: list, clip_name: str) -> dict | None:
+    import urllib.request
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not gemini_key or not frames:
+        return None
+    idxs = sorted({int(i * (len(frames) - 1) / 3) for i in range(4)}) if len(frames) > 1 else [0]
+    parts = []
+    for i in idxs:
+        with open(frames[i], "rb") as fh:
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": base64.b64encode(fh.read()).decode("utf-8"),
                 }
-            },
-            "required": ["pilihan"],
-        },
-    }
+            })
+    parts.append({
+        "text": (
+            f"Nama file: {clip_name}. Amati gambar-gambar dari klip video/foto ini. "
+            "Jelaskan secara LITERAL apa yang tampak di layar (siapa tokohnya, apa aksinya, benda apa yang terlihat, suasananya). "
+            'Keluarkan HANYA JSON valid: {"deskripsi":"...","tag":["kata1","kata2","kata3"],"ada_orang":true,"wajah_jelas":true}'
+        )
+    })
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    body = json.dumps({
+        "contents": [{"parts": parts}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    txt = data["candidates"][0]["content"]["parts"][0]["text"]
+    return _parse_json_loose(txt)
 
+
+def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, words: list, proj_dir: str, model: str = "claude-sonnet-4-6", scenes: list = None) -> dict:
     cache_p = os.path.join(proj_dir, "clip_labels.json")
     try:
         cache = json.load(open(cache_p, encoding="utf-8")) if os.path.exists(cache_p) else {}
@@ -804,73 +802,102 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
     dirty = False
     for c in clips:
         sz = os.path.getsize(c["path"])
-        if c["name"] in cache and cache[c["name"]].get("size") == sz:
+        if c["name"] in cache and cache[c["name"]].get("size") == sz and cache[c["name"]].get("deskripsi"):
             print("Cache label:", c["name"], "->", cache[c["name"]].get("deskripsi", "")[:60])
             continue
         try:
-            fr = c["frames"]
-            if not fr:
-                continue
-            idxs = sorted({int(i * (len(fr) - 1) / 3) for i in range(4)}) if len(fr) > 1 else [0]
-            content = []
-            for i in idxs:
-                with open(fr[i], "rb") as fh:
-                    content.append({
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(fh.read()).decode()},
-                    })
-            content.append({"type": "text", "text": f"Nama file: {c['name']}. Panggil tool label_klip untuk mendeskripsikan isi visualnya secara ringkas."})
-            r = client.messages.create(
-                model=model,
-                max_tokens=600,
-                tools=[label_tool],
-                tool_choice={"type": "tool", "name": "label_klip"},
-                messages=[{"role": "user", "content": content}],
-            )
-            tu = next((b for b in r.content if getattr(b, "type", "") == "tool_use"), None)
-            if tu is not None:
-                out = tu.input
+            out = _gemini_vision_label(c.get("frames") or [], c["name"])
+            if out and out.get("deskripsi"):
                 cache[c["name"]] = {"size": sz, **out}
                 dirty = True
-                print("Label baru:", c["name"], "->", out.get("deskripsi", "")[:60])
+                print("Label Gemini baru:", c["name"], "->", out.get("deskripsi", "")[:60])
+            else:
+                # Fallback deskripsi dari nama file jika tanpa API key
+                clean_nm = re.sub(r"^\d+_", "", os.path.splitext(c["name"])[0]).replace("_", " ")
+                cache[c["name"]] = {"size": sz, "deskripsi": clean_nm, "tag": clean_nm.split(), "ada_orang": True, "wajah_jelas": False}
+                dirty = True
         except Exception as e:
-            print(f"(!) Gagal label {c['name']}: {str(e)[:180]}")
+            print(f"(!) Gagal label {c['name']}: {str(e)[:140]}")
+            clean_nm = re.sub(r"^\d+_", "", os.path.splitext(c["name"])[0]).replace("_", " ")
+            cache[c["name"]] = {"size": sz, "deskripsi": clean_nm, "tag": clean_nm.split(), "ada_orang": True, "wajah_jelas": False}
+            dirty = True
+
     if dirty:
         with open(cache_p, "w", encoding="utf-8") as fh:
             json.dump(cache, fh, ensure_ascii=False, indent=2)
 
     ids = {f"K{i + 1:02d}": c for i, c in enumerate(clips)}
     klip_list = [
-        {"id": k, "deskripsi": cache.get(c["name"], {}).get("deskripsi", c["name"])}
+        {
+            "id": k,
+            "nama_file": c["name"],
+            "deskripsi_visual": cache.get(c["name"], {}).get("deskripsi", c["name"]),
+            "ada_orang": cache.get(c["name"], {}).get("ada_orang", False),
+        }
         for k, c in ids.items()
     ]
-    kal_list = [{"teks": u} for u in unit_texts]
+
+    # Gunakan daftar scenes dari Auto Director jika tersedia, agar pencocokan berbasis visual_literal
+    if scenes:
+        kal_list = [
+            {
+                "no": idx + 1,
+                "kalimat": sc.get("narasi", ""),
+                "visual_yang_dibutuhkan": sc.get("visual_literal", ""),
+                "keyword": sc.get("keyword_cari", ""),
+            }
+            for idx, sc in enumerate(scenes)
+            if sc.get("narasi")
+        ]
+    else:
+        kal_list = [{"no": idx + 1, "kalimat": u, "visual_yang_dibutuhkan": u} for idx, u in enumerate(unit_texts)]
+
+    match_prompt = f"""Kamu adalah asisten editor dokumenter yang memasangkan SETIAP kalimat narasi dengan klip video/foto yang PALING MEMBUKTIKAN isi kalimat tersebut.
+
+DAFTAR KALIMAT & VISUAL YANG DIBUTUHKAN:
+{json.dumps(kal_list, ensure_ascii=False, indent=2)}
+
+DAFTAR KLIP TERSEDIA DI GOOGLE DRIVE:
+{json.dumps(klip_list, ensure_ascii=False, indent=2)}
+
+ATURAN PENCOCOKAN WAJIB:
+1. Pasangkan SETIAP nomor kalimat ("no") dengan 1 "id_klip" (K01, K02, dst) yang visualnya PALING COCOK dengan aksi/benda/tokoh di kalimat tersebut.
+2. JANGAN memutar klip secara urut/bergilir buta! Jika kalimat bicara soal penyerahan bantuan/uang, pilih klip penyerahan bantuan. Jika bicara soal puing kebakaran, pilih klip puing kebakaran.
+3. Hindari memakai klip yang persis sama dua kali berturut-turut kecuali memang tidak ada klip lain yang relevan.
+4. Sertakan "frasa_trigger" (2-4 kata persis huruf kecil dari kalimat tersebut) dan "alasan" singkat kenapa klip itu dipilih.
+
+Keluarkan HANYA JSON valid:
+{{"pilihan": [{{"no": 1, "kalimat": "...", "frasa_trigger": "...", "id_klip": "K01", "alasan": "..."}}]}}"""
 
     hints = {}
+    scene_pairs = []
     try:
-        r2 = client.messages.create(
-            model=model,
-            max_tokens=3000,
-            tools=[match_tool],
-            tool_choice={"type": "tool", "name": "cocokkan_klip"},
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Panggil tool cocokkan_klip untuk memasangkan frasa persis (2-4 kata) dari kalimat narasi ke id_klip yang paling relevan:\n"
-                        + json.dumps({"kalimat": kal_list, "klip": klip_list}, ensure_ascii=False)
-                    ),
-                }
-            ],
-        )
-        tu2 = next((b for b in r2.content if getattr(b, "type", "") == "tool_use"), None)
-        if tu2 is not None:
-            for p in tu2.input.get("pilihan", []):
-                c = ids.get(p.get("id_klip"))
-                if c and find_trigger(words, p.get("frasa", "")) is not None:
-                    hints[p["frasa"]] = c["name"]
+        res_match = _call_llm_json(match_prompt, anthropic_client=client, model=model)
+        for p in res_match.get("pilihan", []):
+            c = ids.get(p.get("id_klip"))
+            if not c:
+                continue
+            kal_txt = str(p.get("kalimat") or "").strip()
+            trig = str(p.get("frasa_trigger") or "").strip()
+            if not trig and kal_txt:
+                trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", kal_txt.lower()).split()[:4])
+            if trig:
+                hints[trig] = c["name"]
+            scene_pairs.append({
+                "no": p.get("no"),
+                "kalimat": kal_txt,
+                "klip": c["name"],
+                "alasan": str(p.get("alasan") or "").strip(),
+            })
     except Exception as e:
-        print(f"(!) Pencocokan B-roll dilewati: {str(e)[:180]}")
+        print(f"(!) Pencocokan B-roll Gemini gagal: {str(e)[:180]}")
+
+    # Simpan pasangan kalimat -> klip ke file bantu agar bisa dibaca Telegram preview
+    try:
+        with open(os.path.join(proj_dir, "scene_pairs.json"), "w", encoding="utf-8") as fh:
+            json.dump(scene_pairs, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
     return hints
 
