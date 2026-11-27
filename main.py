@@ -35,7 +35,8 @@ def main():
 
     assert folder_name, "INPUT_FOLDER_NAME kosong!"
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    assert api_key, "ANTHROPIC_API_KEY belum disetel di Secrets!"
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    assert api_key or gemini_key, "Pasang GEMINI_API_KEY (gratis) atau ANTHROPIC_API_KEY di Secrets!"
 
     work_dir = "/tmp/work_proj"
     proj_dir = os.path.join(work_dir, "assets")
@@ -49,7 +50,7 @@ def main():
     state_path = os.path.join(proj_dir, "plan_state.json")
 
     if mode in ("plan", "auto"):
-        send_message(chat_id, f"⏳ <b>Memproses folder:</b> <code>{html.escape(folder_name)}</code>\nMengunduh aset, menjalankan Whisper & menyusun rencana Claude...")
+        send_message(chat_id, f"⏳ <b>Memproses folder:</b> <code>{html.escape(folder_name)}</code>\nMengunduh aset, menjalankan Whisper & menyusun rencana editorial Gemini...")
         download_project_assets(drive, folder_id, proj_dir, include_media=True)
 
         audio_files = sorted(glob.glob(f"{proj_dir}/*.mp3") + glob.glob(f"{proj_dir}/*.m4a") + glob.glob(f"{proj_dir}/*.wav"))
@@ -64,10 +65,12 @@ def main():
         vo_dur = probe(vo_path)["dur"]
         words, units, unit_texts = align_whisper(vo_path, text, vo_dur, model_name="small")
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key) if api_key else None
         plan = run_auto_director(client, text, DEFAULT_STYLE_NOTE, project_note, model=model)
         clips = scan_local_clips(proj_dir, work_dir, extract_frames=True)
-        clip_hints = run_auto_broll(client, clips, unit_texts, words, proj_dir, model=model)
+        clip_hints = run_auto_broll(client, clips, unit_texts, words, proj_dir, model=model, scenes=plan.get("scenes"))
+        scene_pairs_path = os.path.join(proj_dir, "scene_pairs.json")
+        scene_pairs = json.load(open(scene_pairs_path, encoding="utf-8")) if os.path.exists(scene_pairs_path) else []
 
         labels_path = os.path.join(proj_dir, "clip_labels.json")
         if os.path.exists(labels_path):
@@ -82,7 +85,10 @@ def main():
             "topic": plan.get("topic", folder["name"]),
             "hook_lines": plan.get("hook_lines", []),
             "keywords": plan.get("keywords", []),
-            "cta_text": "",
+            "cta_text": plan.get("cta_pertanyaan", ""),
+            "fakta_konkret": plan.get("fakta_konkret", []),
+            "scenes": plan.get("scenes", []),
+            "scene_pairs": scene_pairs,
             "overlays": plan.get("overlays", []),
             "clip_hints": clip_hints,
             "usable_names": [c["name"] for c in clips],

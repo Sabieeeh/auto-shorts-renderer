@@ -57,24 +57,25 @@ def send_message(chat_id: str, text: str, reply_markup: dict = None, parse_mode:
 
 def _ringkas_ov(o: dict) -> str:
     t = o.get("type")
-    if t == "big":
-        return " / ".join(o.get("lines", []))
-    if t == "lower":
+    if t == "roto_typo":
+        return " / ".join(o.get("lines", [])) + " (di belakang subjek)"
+    if t == "stat_counter":
+        return f"{o.get('prefix', '')}{o.get('value', '')}{o.get('suffix', '')} — {o.get('label', '')}"
+    if t == "draw_on":
+        return f"[{o.get('shape', 'circle')}] {o.get('label', '')}"
+    if t == "kinetic_typo":
+        k = o.get("kicker", "")
+        ls = " / ".join(o.get("lines", []))
+        return f"{k + ': ' if k else ''}{ls}"
+    if t == "marker_quote":
         return f"{o.get('badge', '')} | {o.get('text', '')}"
-    if t == "list":
-        items = ", ".join(i.get("text", "") for i in o.get("items", []))
-        return f"{o.get('title', '')}: {items}"
-    if t == "icon":
-        return f"[{o.get('icon', '')}] {o.get('label', '')}"
-    if t == "qmark":
+    if t == "camera_beat":
         return o.get("label", "")
-    if t == "map":
-        return f"{o.get('label', '')} ({o.get('sub', '')}) pin={o.get('pin')}"
     return str(o)[:60]
 
 
 def send_approval_card(chat_id: str, state: dict):
-    """Kirim ringkasan rencana overlay & B-roll beserta tombol Setuju di Telegram."""
+    """Kirim ringkasan rencana berbasis bukti visual (Kalimat -> Klip) & overlay momen penting."""
     folder = html.escape(state["folder_name"])
     theme = html.escape(state["theme"])
     topic = html.escape(state["topic"])
@@ -85,46 +86,56 @@ def send_approval_card(chat_id: str, state: dict):
     overlays = state.get("overlays", [])
     hints = state.get("clip_hints", {})
     usable = state.get("usable_names", [])
+    fakta = state.get("fakta_konkret", [])
+    scene_pairs = state.get("scene_pairs", [])
+
+    fakta_block = ""
+    if fakta:
+        f_lines = [f"• {html.escape(x)}" for x in fakta[:4]]
+        fakta_block = "\n<b>📌 Fakta Konkret:</b>\n" + "\n".join(f_lines) + "\n"
+
+    pair_lines = []
+    if scene_pairs:
+        for sp in scene_pairs[:18]:
+            no = sp.get("no", 0)
+            kal = html.escape(str(sp.get("kalimat", ""))[:85])
+            klip = html.escape(str(sp.get("klip", "")))
+            pair_lines.append(f"<code>[{no:02d}]</code> <i>\"{kal}\"</i>\n     ↳ 🎬 <code>{klip}</code>")
+    else:
+        for i, (fr, fn) in enumerate(list(hints.items())[:18], 1):
+            pair_lines.append(f"<code>[{i:02d}]</code> <i>\"{html.escape(fr)}\"</i> → 🎬 <code>{html.escape(fn)}</code>")
 
     ov_lines = []
     for i, o in enumerate(overlays, 1):
         trig = html.escape(o.get("trigger", ""))
         desc = html.escape(_ringkas_ov(o))
-        ov_lines.append(f"<code>[{i:02d}]</code> <b>{o.get('type')}</b> @ <i>\"{trig}\"</i> → {desc}")
-
-    clip_lines = []
-    for i, (fr, fn) in enumerate(list(hints.items())[:15], 1):
-        clip_lines.append(f"<code>[{i:02d}]</code> <i>\"{html.escape(fr)}\"</i> → <code>{html.escape(fn)}</code>")
+        alasan = html.escape(o.get("alasan", ""))
+        extra = f" <i>({alasan})</i>" if alasan else ""
+        ov_lines.append(f"<code>[{i:02d}]</code> <b>{o.get('type')}</b> @ <i>\"{trig}\"</i> → {desc}{extra}")
 
     msg = (
-        f"🎬 <b>RENCANA VIDEO SIAP DISETUJUI</b>\n"
-        f"📁 Folder: <code>{folder}</code> | ⏱ VO: <b>{dur:.1f} dtk</b>\n"
-        f"🎨 Tema: <b>{theme}</b> | Aset: <b>{len(usable)} klip</b>\n"
-        f"📌 Topik: {topic}\n"
-        f"🪝 Hook: <b>{hook}</b>\n"
-        f"🔑 Keyword: <code>{kws}</code>\n"
-        f"📣 CTA: {cta}\n\n"
-        f"<b>✨ DAFTAR OVERLAY ({len(overlays)} item):</b>\n"
-        + ("\n".join(ov_lines) if ov_lines else "(kosong)")
-        + "\n\n<b>🎞 PASANGAN B-ROLL UTAMA:</b>\n"
-        + ("\n".join(clip_lines) if clip_lines else "(otomatis bergantian)")
-        + "\n\n<b>✏️ Edit Cepat (opsional sebelum Setuju):</b>\n"
-        f"• <code>/hapus {folder} | 3, 7</code>\n"
-        f"• <code>/tema {folder} | hutan</code>\n"
-        f"• <code>/hook {folder} | BARIS 1 | BARIS 2</code>\n"
-        f"• <code>/cta {folder} | FOLLOW UNTUK FAKTA LAINNYA</code>\n"
-        f"• <code>/klip {folder} | 1=namafile.mp4</code>"
+        f"🎬 <b>RENCANA VIDEO SIAP DITINJAU</b>\n"
+        f"📁 <b>Folder:</b> <code>{folder}</code> ({dur:.1f} dtk)\n"
+        f"🎨 <b>Tema:</b> <code>{theme}</code> | <b>Topik:</b> {topic}\n"
+        f"🪝 <b>Hook:</b> {hook}\n"
+        f"💬 <b>CTA Komentar:</b> {cta}\n"
+        f"🔍 <b>Keyword Visual:</b> {kws}\n"
+        f"{fakta_block}\n"
+        f"🎞 <b>Pasangan Kalimat → Klip ({len(pair_lines)} adegan):</b>\n"
+        + ("\n".join(pair_lines) if pair_lines else "• (belum ada pasangan kalimat)")
+        + f"\n\n✨ <b>Overlay Momen Penting ({len(overlays)} titik):</b>\n"
+        + ("\n".join(ov_lines) if ov_lines else "• (tanpa overlay)")
+        + f"\n\n📦 <b>Stok Klip ({len(usable)}):</b> <code>{html.escape(', '.join(usable[:12]))}</code>\n\n"
+        f"✏️ <b>Koreksi cepat:</b>\n"
+        f"• Ganti klip kalimat: <code>/klip 2 | nama_file.mp4</code>\n"
+        f"• Ganti hook: <code>/hook BARIS 1 | BARIS 2</code>\n"
+        f"• Hapus overlay: <code>/hapus 2</code>\n"
+        f"• Lanjut render: <code>/setuju {folder}</code>"
     )
 
-    keyboard = {
+    kb = {
         "inline_keyboard": [
-            [
-                {"text": "✅ Setuju & Render Final", "callback_data": f"approve:{state['folder_name']}"},
-            ],
-            [
-                {"text": "🔄 Acak Ulang Rencana", "callback_data": f"replan:{state['folder_name']}"},
-                {"text": "❌ Batal", "callback_data": f"cancel:{state['folder_name']}"},
-            ],
+            [{"text": f"✅ Setuju & Render {state['folder_name']}", "callback_data": f"/setuju {state['folder_name']}"}]
         ]
     }
-    send_message(chat_id, msg, reply_markup=keyboard)
+    send_message(chat_id, msg, reply_markup=kb)
