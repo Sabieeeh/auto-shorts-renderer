@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/remotion_overlay/node_modules
-          key: remotion-nm-${{ runner.os }}-4.0.352-gf1
+          key: remotion-nm-v2-${{ runner.os }}-4.0.352-gf1
 
       - name: Install Remotion npm packages
         if: steps.cache-remotion.outputs.cache-hit != 'true'
