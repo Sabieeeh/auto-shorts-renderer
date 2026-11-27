@@ -5,7 +5,7 @@ OUT_W = 1920 if IS_LONG else 1080
 OUT_H = 1080 if IS_LONG else 1920
 
 REMO_FILES = {
-    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352","@remotion/motion-blur":"4.0.352","@remotion/transitions":"4.0.352"}}""",
+    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352","@remotion/motion-blur":"4.0.352","@remotion/paths":"4.0.352","@remotion/transitions":"4.0.352"}}""",
     "tsconfig.json": r"""{"compilerOptions":{"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":false,"skipLibCheck":true,"esModuleInterop":true,"noEmit":true},"include":["src"]}""",
     "src/index.ts": r"""import {registerRoot} from "remotion";
 import {CameraMotionBlur} from "@remotion/motion-blur";
@@ -196,6 +196,31 @@ const CameraRig: React.FC<{children: React.ReactNode}> = ({children}) => {
     }}>
       {children}
     </div>
+  );
+};
+
+
+const PathCallout: React.FC<{d?: string; color?: string; startFrame?: number}> = ({
+  d = "M 40 220 Q 180 60 360 140 T 620 90",
+  color = "#FF4D2D",
+  startFrame = 0,
+}) => {
+  const f = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const prog = Math.min(1, Math.max(0, spring({frame: f - startFrame, fps, config: SPR_SNAP})));
+  const evo = evolvePath(prog, d);
+  return (
+    <svg width="700" height="300" viewBox="0 0 700 300" style={{overflow: "visible"}}>
+      <path
+        d={d}
+        fill="none"
+        stroke={color}
+        strokeWidth={10}
+        strokeLinecap="round"
+        strokeDasharray={evo.strokeDasharray}
+        strokeDashoffset={evo.strokeDashoffset}
+      />
+    </svg>
   );
 };
 
