@@ -619,24 +619,68 @@ def _sanitize_plan(p: dict) -> dict:
     }
 
 
+def _gemini_post(payload: dict, timeout: int = 45) -> dict:
+    import urllib.request, urllib.error
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not gemini_key:
+        raise RuntimeError("GEMINI_API_KEY kosong")
+
+    # 1. Ambil daftar model aktif yang mendukung generateContent langsung dari API key Anda
+    candidates = []
+    try:
+        m_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
+        with urllib.request.urlopen(m_url, timeout=15) as r:
+            m_data = json.loads(r.read().decode("utf-8"))
+        avail = [
+            m["name"].replace("models/", "")
+            for m in m_data.get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+        ]
+        for pref in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest"]:
+            if pref in avail and pref not in candidates:
+                candidates.append(pref)
+        for m in avail:
+            if "gemini" in m and "embedding" not in m and m not in candidates:
+                candidates.append(m)
+    except Exception:
+        pass
+
+    if not candidates:
+        candidates = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-flash-latest"]
+
+    last_err = None
+    for mdl in candidates[:6]:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key={gemini_key}"
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as he:
+            detail = he.read().decode("utf-8", errors="ignore")[:180]
+            last_err = f"HTTP {he.code} ({mdl}): {detail}"
+            if he.code == 404:
+                continue
+            raise RuntimeError(last_err)
+        except Exception as e:
+            last_err = f"{mdl}: {str(e)[:160]}"
+    raise RuntimeError(last_err or "Semua model Gemini gagal")
+
+
 def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonnet-4-6") -> dict:
     """Gunakan GEMINI_API_KEY (gratis) terlebih dahulu jika tersedia, lalu Claude."""
     import urllib.request
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if gemini_key:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-            body = json.dumps({
+            data = _gemini_post({
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"responseMimeType": "application/json", "temperature": 0.35},
-            }).encode("utf-8")
-            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=45) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            }, timeout=45)
             txt = data["candidates"][0]["content"]["parts"][0]["text"]
             return _parse_json_loose(txt)
         except Exception as e:
-            print(f"(!) Gemini API dilewati ({str(e)[:140]}), beralih ke cadangan...")
+            print(f"(!) Gemini API dilewati ({str(e)[:180]}), beralih ke cadangan...")
 
     if anthropic_client is not None:
         resp = anthropic_client.messages.create(
@@ -780,14 +824,10 @@ def _gemini_vision_label(frames: list, clip_name: str) -> dict | None:
             'Keluarkan HANYA JSON valid: {"deskripsi":"...","tag":["kata1","kata2","kata3"],"ada_orang":true,"wajah_jelas":true}'
         )
     })
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    body = json.dumps({
+    data = _gemini_post({
         "contents": [{"parts": parts}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    }, timeout=45)
     txt = data["candidates"][0]["content"]["parts"][0]["text"]
     return _parse_json_loose(txt)
 
