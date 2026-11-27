@@ -621,76 +621,51 @@ def _sanitize_plan(p: dict) -> dict:
 
 def _gemini_post(payload: dict, timeout: int = 45) -> dict:
     import urllib.request, urllib.error
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not gemini_key:
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not key:
         raise RuntimeError("GEMINI_API_KEY kosong")
-
-    # 1. Ambil daftar model aktif yang mendukung generateContent langsung dari API key Anda
-    candidates = []
-    try:
-        m_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
-        with urllib.request.urlopen(m_url, timeout=15) as r:
-            m_data = json.loads(r.read().decode("utf-8"))
-        avail = [
-            m["name"].replace("models/", "")
-            for m in m_data.get("models", [])
-            if "generateContent" in m.get("supportedGenerationMethods", [])
-        ]
-        for pref in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest"]:
-            if pref in avail and pref not in candidates:
-                candidates.append(pref)
-        for m in avail:
-            if "gemini" in m and "embedding" not in m and m not in candidates:
-                candidates.append(m)
-    except Exception:
-        pass
-
-    if not candidates:
-        candidates = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-flash-latest"]
-
-    last_err = None
-    for mdl in candidates[:6]:
+    cands = []
+    for ver in ("v1beta", "v1"):
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key={gemini_key}"
-            body = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(f"https://generativelanguage.googleapis.com/{ver}/models?key={key}", timeout=15) as r:
+                ms = json.loads(r.read().decode()).get("models", [])
+            for m in ms:
+                nm = m["name"].replace("models/", "")
+                if "generateContent" in m.get("supportedGenerationMethods", []) and "gemini" in nm and "embedding" not in nm:
+                    cands.append((ver, nm))
+        except Exception:
+            pass
+    pref = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest", "gemini-1.5-flash"]
+    cands = sorted(dict.fromkeys(cands), key=lambda x: (next((i for i, p in enumerate(pref) if x[1].startswith(p)), 99), 0 if x[0] == "v1beta" else 1))
+    if not cands:
+        cands = [("v1beta", "gemini-2.0-flash"), ("v1", "gemini-2.0-flash"), ("v1beta", "gemini-flash-latest")]
+    err = None
+    for ver, mdl in cands[:8]:
+        try:
+            pl = json.loads(json.dumps(payload))
+            if ver == "v1":
+                pl.get("generationConfig", {}).pop("responseMimeType", None)
+            req = urllib.request.Request(f"https://generativelanguage.googleapis.com/{ver}/models/{mdl}:generateContent?key={key}", data=json.dumps(pl).encode(), headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                print(f"[Gemini] OK -> {ver}/{mdl}")
+                return json.loads(resp.read().decode())
         except urllib.error.HTTPError as he:
-            detail = he.read().decode("utf-8", errors="ignore")[:180]
-            last_err = f"HTTP {he.code} ({mdl}): {detail}"
-            if he.code == 404:
-                continue
-            raise RuntimeError(last_err)
+            err = f"HTTP {he.code} ({ver}/{mdl}): {he.read().decode(errors='ignore')[:180]}"
+            if he.code in (400, 404): continue
+            raise RuntimeError(err)
         except Exception as e:
-            last_err = f"{mdl}: {str(e)[:160]}"
-    raise RuntimeError(last_err or "Semua model Gemini gagal")
+            err = f"{ver}/{mdl}: {str(e)[:150]}"
+    raise RuntimeError(err or "Semua model Gemini gagal")
 
 
 def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonnet-4-6") -> dict:
-    """Gunakan GEMINI_API_KEY (gratis) terlebih dahulu jika tersedia, lalu Claude."""
-    import urllib.request
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if gemini_key:
-        try:
-            data = _gemini_post({
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.35},
-            }, timeout=45)
-            txt = data["candidates"][0]["content"]["parts"][0]["text"]
-            return _parse_json_loose(txt)
-        except Exception as e:
-            print(f"(!) Gemini API dilewati ({str(e)[:180]}), beralih ke cadangan...")
-
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        d = _gemini_post({"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0.35}}, timeout=45)
+        return _parse_json_loose(d["candidates"][0]["content"]["parts"][0]["text"])
     if anthropic_client is not None:
-        resp = anthropic_client.messages.create(
-            model=model,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        resp = anthropic_client.messages.create(model=model, max_tokens=4096, messages=[{"role": "user", "content": prompt}])
         return _parse_json_loose(_extract_claude_text(resp))
-
-    raise RuntimeError("Tidak ada API key aktif (pasang GEMINI_API_KEY di GitHub Secrets)")
+    raise RuntimeError("Tidak ada API key aktif")
 
 
 def run_auto_director(client: anthropic.Anthropic, text: str, style_note: str, project_note: str, model: str = "claude-sonnet-4-6") -> dict:
