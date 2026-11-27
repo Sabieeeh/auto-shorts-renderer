@@ -32,7 +32,7 @@ FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
 OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
 SKIP_PREFIXES = ("output_", "short_", "long_")
-ALLOWED_OVERLAY_TYPES = {"roto_typo", "kinetic_typo", "marker_quote", "floating_card", "camera_beat"}
+ALLOWED_OVERLAY_TYPES = {"roto_typo", "kinetic_typo", "marker_quote", "floating_card", "camera_beat", "stat_counter"}
 TARGET_LUFS = -16.0
 
 THEMES = {
@@ -611,6 +611,7 @@ ATURAN WAJIB:
 1. Pilih "theme" paling cocok dari: "api", "hutan", "bumi", "laut", "malam".
 2. Buat {target_ov} di array "overlays" (tiap overlay berjarak minimal ~7 detik dari yang lain). Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
 3. Gunakan HANYA 5 tipe animasi dinamis berikut secara bergantian (WAJIB sertakan 2-3 kali tipe "roto_typo" pada momen tokoh/subjek utama agar teks raksasa muncul di belakang tubuh subjek):
+  - "stat_counter": Angka berjalan (count-up) untuk nominal uang, jumlah rumah, tahun, atau persentase. Format: {"type":"stat_counter", "trigger":"...", "prefix":"Rp ", "value":690000000, "suffix":"", "label":"BANTUAN LANGSUNG"}
   - "kinetic_typo": Tipografi parallax besar tanpa kotak dengan kicker atas. Format: {{"type":"kinetic_typo", "trigger":"...", "kicker":"KONTEKS SINGKAT", "lines":["BARIS UTAMA", "*KATA KUNCI"]}} (awalan * pada baris kedua otomatis diberi efek stabilo).
   - "marker_quote": Kutipan/fakta tajam dengan garis vertikal menyala & stabilo berjalan. Format: {{"type":"marker_quote", "trigger":"...", "badge":"FAKTA LAPANGAN", "text":"KALIMAT FAKTA SINGKAT"}}
   - "floating_card": Kartu mengambang 3D dengan kilau cahaya untuk angka/bukti penting. Format: {{"type":"floating_card", "trigger":"...", "badge":"SOROTAN DATA", "value":"ANGKA/INTI SINGKAT", "label":"KETERANGAN SINGKAT"}}

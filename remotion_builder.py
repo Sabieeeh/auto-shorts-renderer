@@ -224,6 +224,71 @@ const PathCallout: React.FC<{d?: string; color?: string; startFrame?: number}> =
   );
 };
 
+
+// ----------------------------------------------------------------------------
+// STAT_COUNTER: Angka berjalan dinamis (odometer / count-up dengan spring)
+// ----------------------------------------------------------------------------
+const StatCounter: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const p = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR_FLOAT})));
+
+  const rawNum = Number(o.value ?? String(o.number || "0").replace(/[^0-9.-]/g, "")) || 0;
+  const curVal = Math.round(rawNum * p);
+  const formatted = curVal.toLocaleString("id-ID");
+  const prefix = o.prefix || "";
+  const suffix = o.suffix || "";
+  const label = (o.label || o.text || "").toUpperCase();
+
+  const boxH = isLand ? 420 : 540;
+  const boxTop = Math.round(zoneMid(isLand) - boxH / 2);
+
+  return (
+    <MotionStage dur={dur}>
+      <div style={{
+        position: "absolute", left: 48, right: 48, top: boxTop, height: boxH,
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        transform: `translateY(${(1 - p) * 45}px) scale(${0.92 + p * 0.08})`,
+        opacity: p,
+      }}>
+        {o.kicker ? (
+          <div style={{
+            fontFamily: F_BODY, fontWeight: 700, fontSize: isLand ? 24 : 28,
+            letterSpacing: 3, color: C.cream, backgroundColor: C.orange,
+            padding: "6px 18px", borderRadius: 6, marginBottom: 14,
+            textTransform: "uppercase",
+          }}>
+            {o.kicker}
+          </div>
+        ) : null}
+        <div style={{
+          fontFamily: F_COND, fontWeight: 700,
+          fontSize: isLand ? 132 : 148, lineHeight: 1, letterSpacing: 2,
+          color: C.orange,
+          WebkitTextStroke: `6px ${C.black}`,
+          paintOrder: "stroke fill",
+          textShadow: "0 14px 36px rgba(0,0,0,0.9)",
+          textAlign: "center",
+        }}>
+          {prefix}{formatted}{suffix}
+        </div>
+        {label ? (
+          <div style={{
+            fontFamily: F_BODY, fontWeight: 800,
+            fontSize: isLand ? 34 : 40, lineHeight: 1.2,
+            color: C.cream, marginTop: 14, textAlign: "center",
+            textShadow: "0 4px 16px rgba(0,0,0,0.95)",
+          }}>
+            {label}
+          </div>
+        ) : null}
+      </div>
+    </MotionStage>
+  );
+};
+
 const RotoTypo: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -642,6 +707,7 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
 // Registrasi komponen baru + pemetaan otomatis jika ada tipe lama dari cache
 const REG: any = {
   roto_typo: RotoTypo,
+  stat_counter: StatCounter,
   kinetic_typo: KineticTypo,
   marker_quote: MarkerQuote,
   floating_card: FloatingCard,
