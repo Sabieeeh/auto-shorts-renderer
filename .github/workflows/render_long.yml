@@ -100,7 +100,7 @@ jobs:
       - name: Install Remotion npm packages
         if: steps.cache-remotion.outputs.cache-hit != 'true'
         run: |
-          cd /tmp/remotion_overlay && npm install --no-audit --no-fund
+          cd /tmp/remotion_overlay && npm install --no-audit --no-fund && npm install --no-audit --no-fund @remotion/motion-blur@4.0.352 @remotion/paths@4.0.352 @remotion/transitions@4.0.352
 
       - name: Jalankan Pipeline Video Panjang
         env:

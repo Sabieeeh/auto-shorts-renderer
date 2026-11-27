@@ -840,4 +840,11 @@ def prepare_remotion_project(remo_dir: str = "/tmp/remotion_overlay"):
 
 def download_geo_assets(remo_dir: str = "/tmp/remotion_overlay"):
     """Dipertahankan hanya agar impor lama tidak error. Peta sudah dihapus."""
+    _mb_dir = os.path.join(None, "node_modules", "@remotion", "motion-blur")
+    if not os.path.isdir(_mb_dir):
+        subprocess.run(
+            ["npm", "install", "--no-audit", "--no-fund",
+             "@remotion/motion-blur@4.0.352", "@remotion/paths@4.0.352", "@remotion/transitions@4.0.352"],
+            cwd=None, check=True
+        )
     return None
