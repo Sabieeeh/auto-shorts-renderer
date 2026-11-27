@@ -89,6 +89,7 @@ def main():
             "excluded_clips": [],
             "words": words,
             "units": units,
+            "unit_texts": unit_texts,
         }
         with open(state_path, "w", encoding="utf-8") as fh:
             json.dump(state, fh, ensure_ascii=False, indent=2)

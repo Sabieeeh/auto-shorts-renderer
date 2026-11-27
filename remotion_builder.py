@@ -180,6 +180,369 @@ const Panel: React.FC<any> = ({x, y, w, h, style = {}, children}) => {
   );
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EDITORIAL MOTION GRAPHIC COMPONENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 1. CoverStory — magazine investigative title layout
+const CoverStory: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const Z = ZONE(isLand);
+
+  // Thin framing rules animate in
+  const ruleP = interpolate(f, [0, 14], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
+  // Global fade out
+  const fadeOut = interpolate(f, [dur - 8, dur], [1, 0], clamp);
+
+  const kicker = up(o.kicker || o.badge || "LAPORAN KHUSUS");
+  const titleLines: string[] = wrapLines(o.lines || [up(o.title || o.text || "")], isLand ? 24 : 14).slice(0, 3);
+  const sub = up(o.sub || "");
+
+  const boxW = isLand ? 1480 : 920;
+  const boxX = (width - boxW) / 2;
+  const boxTop = isLand ? Z.top + 60 : Z.top + 80;
+
+  const ruleW = boxW * ruleP;
+  const ruleColor = C.orange;
+
+  return (
+    <AbsoluteFill style={{opacity: fadeOut, fontFamily: F_DISPLAY}}>
+      {/* subtle dark vignette for readability */}
+      <div style={{
+        position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+        background: "radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0.28) 0%, rgba(0,0,0,0.52) 100%)",
+      }} />
+
+      {/* Top framing rule */}
+      <div style={{
+        position: "absolute", left: boxX, top: boxTop, height: 2,
+        width: ruleW, background: `linear-gradient(90deg, ${ruleColor}, rgba(255,255,255,0.7), ${ruleColor})`,
+        boxShadow: `0 0 10px rgba(var(--a),0.6)`,
+      }} />
+
+      {/* Kicker label */}
+      <Reveal delay={4} style={{position: "absolute", left: boxX + 8, top: boxTop + 12}}>
+        <div style={{
+          fontFamily: F_COND, fontWeight: 700, fontSize: isLand ? 20 : 24,
+          letterSpacing: 6, color: ruleColor,
+          textShadow: "0 1px 6px rgba(0,0,0,0.9)",
+        }}>{kicker}</div>
+      </Reveal>
+
+      {/* Main title lines — masked overflow: hidden reveal */}
+      <div style={{
+        position: "absolute", left: boxX, top: boxTop + (isLand ? 44 : 52),
+        width: boxW, display: "flex", flexDirection: "column", gap: 4,
+      }}>
+        {titleLines.map((raw, i) => {
+          const l = raw.replace(/^\*/, "");
+          const isAccent = i === titleLines.length - 1 && titleLines.length > 1;
+          const fontSize = isAccent
+            ? Math.max(isLand ? 48 : 56, Math.min(isLand ? 86 : 100, boxW / (Math.max(l.length, 4) * 0.55)))
+            : Math.max(isLand ? 64 : 72, Math.min(isLand ? 112 : 134, boxW / (Math.max(l.length, 4) * 0.62)));
+          return (
+            <div key={i} style={{overflow: "hidden", padding: "0.08em 0"}}>
+              <div style={{
+                transform: `translateY(${interpolate(f, [i * 5, i * 5 + 16], [105, 0], {...clamp, easing: Easing.out(Easing.cubic)})}%)`,
+                fontFamily: isAccent ? F_SERIF : F_DISPLAY,
+                fontStyle: isAccent ? "italic" : "normal",
+                fontWeight: 800,
+                fontSize,
+                lineHeight: 1.1,
+                color: isAccent ? C.orange : C.cream,
+                letterSpacing: isAccent ? 0 : 1,
+                WebkitTextStroke: isAccent ? "0px transparent" : `6px ${C.black}`,
+                paintOrder: "stroke fill",
+                textShadow: isAccent ? `0 0 40px rgba(var(--a),0.5)` : "0 4px 24px rgba(0,0,0,0.9)",
+              } as any}>{l}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Bottom framing rule */}
+      <div style={{
+        position: "absolute", left: boxX,
+        top: boxTop + (isLand ? 44 : 52) + titleLines.length * (isLand ? 108 : 128) + 16,
+        height: 2, width: ruleW,
+        background: `linear-gradient(90deg, ${ruleColor}, rgba(255,255,255,0.5), transparent)`,
+      }} />
+
+      {/* Sub label */}
+      {sub ? (
+        <Reveal delay={titleLines.length * 5 + 10} style={{
+          position: "absolute", left: boxX + 8,
+          top: boxTop + (isLand ? 44 : 52) + titleLines.length * (isLand ? 108 : 128) + 26,
+        }}>
+          <div style={{
+            fontFamily: F_COND, fontWeight: 700, fontSize: isLand ? 18 : 22,
+            letterSpacing: 4, color: C.cream, opacity: 0.82,
+            textShadow: "0 1px 6px rgba(0,0,0,0.85)",
+          }}>{sub}</div>
+        </Reveal>
+      ) : null}
+    </AbsoluteFill>
+  );
+};
+
+// 2. HeadlineWall — staggered news/fact headline strips in upper safe zone
+const HeadlineWall: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const Z = ZONE(isLand);
+
+  const headlines: string[] = (o.headlines || o.lines || [up(o.text || o.label || "")]).slice(0, 3).map(up);
+  const fadeOut = interpolate(f, [dur - 8, dur], [1, 0], clamp);
+
+  const stripW = isLand ? 1360 : 900;
+  const stripX = isLand ? 80 : (width - stripW) / 2;
+  const STRIP_H = isLand ? 60 : 72;
+  const GAP = isLand ? 10 : 12;
+  const startY = Z.top + (isLand ? 10 : 20);
+
+  return (
+    <AbsoluteFill style={{opacity: fadeOut, fontFamily: F_DISPLAY}}>
+      {headlines.map((hl, i) => {
+        const delay = i * 7;
+        const sp = Math.min(1, Math.max(0, spring({frame: f - delay, fps, config: {damping: 16, stiffness: 200, mass: 0.65}})));
+        const tx = (1 - sp) * -60;
+        const alpha = Math.min(1, sp * 1.5);
+        const fy = startY + i * (STRIP_H + GAP);
+        const fontSize = Math.max(isLand ? 22 : 26, Math.min(isLand ? 36 : 42, stripW / (Math.max(hl.length, 6) * 0.72)));
+        return (
+          <div key={i} style={{
+            position: "absolute", left: stripX, top: fy, width: stripW, height: STRIP_H,
+            transform: `translateX(${tx}px)`, opacity: alpha,
+            display: "flex", alignItems: "center",
+            borderLeft: `4px solid ${C.orange}`,
+            boxShadow: `0 2px 16px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.7)`,
+            background: "rgba(0,0,0,0.62)",
+            backdropFilter: "blur(0px)",
+            boxSizing: "border-box", paddingLeft: 20, paddingRight: 16,
+          }}>
+            <div style={{
+              fontFamily: F_COND, fontWeight: 700, fontSize,
+              letterSpacing: 2, color: C.cream, lineHeight: 1.15,
+              textShadow: "0 1px 4px rgba(0,0,0,0.9), 0 4px 16px rgba(0,0,0,0.6)",
+              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              flex: 1,
+            }}>{hl}</div>
+            {/* thin right accent border */}
+            <div style={{
+              width: 3, height: "60%", borderRadius: 2,
+              background: `linear-gradient(180deg, transparent, ${C.orange}, transparent)`,
+              marginLeft: 12, flexShrink: 0,
+            }} />
+          </div>
+        );
+      })}
+    </AbsoluteFill>
+  );
+};
+
+// 3. ChartGrow — animated SVG line/trend chart (strokeDashoffset draw-on)
+const ChartGrow: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const Z = ZONE(isLand);
+
+  const fadeOut = interpolate(f, [dur - 8, dur], [1, 0], clamp);
+  // draw progress: 0 -> 1 over first ~20 frames
+  const drawP = interpolate(f, [4, 28], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
+  const dotP = interpolate(f, [24, 36], [0, 1], {...clamp, easing: Easing.out(Easing.back(2))});
+
+  const chartW = isLand ? 1100 : 820;
+  const chartH = isLand ? 320 : 380;
+  const chartX = (width - chartW) / 2;
+  const chartY = isLand ? Z.top + 60 : Z.top + 100;
+
+  // Parse data points from o.data or generate a simple upward trend
+  const rawPts: number[] = Array.isArray(o.data) && o.data.length >= 2
+    ? o.data.slice(0, 8).map(Number)
+    : [20, 35, 28, 50, 44, 68, 60, 85];
+  const minV = Math.min(...rawPts);
+  const maxV = Math.max(...rawPts);
+  const range = Math.max(maxV - minV, 1);
+  const n = rawPts.length;
+  const pts = rawPts.map((v, i) => ({
+    x: chartX + (i / (n - 1)) * chartW,
+    y: chartY + chartH - ((v - minV) / range) * chartH * 0.82 - chartH * 0.09,
+  }));
+
+  // Build SVG path
+  const pathD = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+  // Approximate path length
+  let pathLen = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i].x - pts[i-1].x, dy = pts[i].y - pts[i-1].y;
+    pathLen += Math.sqrt(dx*dx + dy*dy);
+  }
+  const dashOffset = pathLen * (1 - drawP);
+
+  const title = up(o.title || o.label || "TREN DATA");
+  const valLabel = up(o.value || "");
+  const endPt = pts[pts.length - 1];
+
+  // subtle grid lines
+  const gridLines = [0.25, 0.5, 0.75].map(frac => chartY + chartH - frac * chartH * 0.82 - chartH * 0.09);
+
+  return (
+    <AbsoluteFill style={{opacity: fadeOut}}>
+      {/* bg vignette */}
+      <div style={{
+        position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+        background: "radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0.3) 0%, rgba(0,0,0,0.55) 100%)",
+      }} />
+
+      {/* Chart SVG */}
+      <svg style={{position: "absolute", left: 0, top: 0, width: "100%", height: "100%"}} viewBox={`0 0 ${width} ${height}`}>
+        {/* grid lines */}
+        {gridLines.map((gy, i) => (
+          <line key={i} x1={chartX} y1={gy} x2={chartX + chartW} y2={gy}
+            stroke={`rgba(255,255,255,0.1)`} strokeWidth={1} strokeDasharray="6 8" />
+        ))}
+        {/* bottom axis */}
+        <line x1={chartX} y1={chartY + chartH} x2={chartX + chartW} y2={chartY + chartH}
+          stroke={`rgba(255,255,255,0.22)`} strokeWidth={1.5} />
+        {/* trend line */}
+        <path d={pathD} fill="none"
+          stroke={C.orange} strokeWidth={isLand ? 4 : 5} strokeLinecap="round" strokeLinejoin="round"
+          strokeDasharray={pathLen} strokeDashoffset={dashOffset}
+          style={{filter: `drop-shadow(0 0 8px rgba(var(--a),0.7))`}}
+        />
+        {/* glow duplicate */}
+        <path d={pathD} fill="none"
+          stroke={`rgba(var(--a),0.25)`} strokeWidth={isLand ? 14 : 18} strokeLinecap="round" strokeLinejoin="round"
+          strokeDasharray={pathLen} strokeDashoffset={dashOffset}
+        />
+        {/* endpoint glowing dot */}
+        <circle cx={endPt.x} cy={endPt.y} r={(isLand ? 10 : 13) * dotP}
+          fill={C.orange} opacity={dotP}
+          style={{filter: `drop-shadow(0 0 12px ${C.orange})`}} />
+        <circle cx={endPt.x} cy={endPt.y} r={(isLand ? 22 : 28) * dotP}
+          fill="none" stroke={C.orange} strokeWidth={2} opacity={dotP * 0.5} />
+      </svg>
+
+      {/* Title */}
+      <Reveal delay={2} style={{position: "absolute", left: chartX, top: chartY - (isLand ? 48 : 60)}}>
+        <div style={{
+          fontFamily: F_COND, fontWeight: 700, fontSize: isLand ? 24 : 28,
+          letterSpacing: 5, color: C.orange,
+          textShadow: "0 1px 6px rgba(0,0,0,0.9)",
+        }}>{title}</div>
+      </Reveal>
+
+      {/* End-point value label */}
+      {valLabel ? (
+        <div style={{
+          position: "absolute",
+          left: Math.min(endPt.x + 16, width - (isLand ? 240 : 200)),
+          top: endPt.y - (isLand ? 44 : 52),
+          opacity: dotP,
+          transform: `scale(${dotP})`,
+          transformOrigin: "left center",
+        }}>
+          <div style={{
+            fontFamily: F_DISPLAY, fontWeight: 800, fontSize: isLand ? 32 : 38,
+            color: C.cream, textShadow: "0 2px 8px rgba(0,0,0,0.9)",
+          }}>{valLabel}</div>
+        </div>
+      ) : null}
+    </AbsoluteFill>
+  );
+};
+
+// 4. FrameBreak — editorial inset: active clip scales down into framed card
+const FrameBreak: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const Z = ZONE(isLand);
+
+  // Scale video down to 0.70 at center over first 10 frames, hold, then scale back up for exit
+  const scaleIn = interpolate(f, [0, 12], [1.0, 0.70], {...clamp, easing: Easing.out(Easing.cubic)});
+  const scaleOut = interpolate(f, [dur - 10, dur], [0.70, 1.0], {...clamp, easing: Easing.in(Easing.cubic)});
+  const scale = f < dur - 10 ? scaleIn : scaleOut;
+
+  // Border fade in
+  const borderAlpha = interpolate(f, [6, 18], [0, 1], clamp);
+  const fadeOut = interpolate(f, [dur - 8, dur], [1, 0], clamp);
+
+  const label = up(o.label || o.text || "");
+  const labelAlpha = interpolate(f, [10, 20], [0, 1], clamp);
+
+  const cardW = width * scale;
+  const cardH = height * scale;
+  const cardX = (width - cardW) / 2;
+  const cardY = (height - cardH) / 2;
+
+  const borderColor = C.orange;
+  const hairline = isLand ? 2 : 2.5;
+
+  return (
+    <AbsoluteFill style={{opacity: fadeOut}}>
+      {/* Dark matte background reveals as clip shrinks */}
+      <div style={{
+        position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+        background: "#0a0a0a",
+        opacity: interpolate(f, [0, 12], [0, 1 - scale * scale], clamp),
+      }} />
+
+      {/* The scaled clip area — just a visual frame overlay since actual video is base layer */}
+      {/* Hairline border */}
+      <svg style={{position: "absolute", left: 0, top: 0, width: "100%", height: "100%"}} viewBox={`0 0 ${width} ${height}`}>
+        {/* outer hairline frame */}
+        <rect
+          x={cardX} y={cardY} width={cardW} height={cardH}
+          fill="none"
+          stroke={borderColor}
+          strokeWidth={hairline}
+          opacity={borderAlpha}
+          rx={4}
+        />
+        {/* corner accent ticks — top-left */}
+        <line x1={cardX} y1={cardY + 36} x2={cardX} y2={cardY} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+        <line x1={cardX} y1={cardY} x2={cardX + 36} y2={cardY} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+        {/* top-right */}
+        <line x1={cardX + cardW - 36} y1={cardY} x2={cardX + cardW} y2={cardY} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+        <line x1={cardX + cardW} y1={cardY} x2={cardX + cardW} y2={cardY + 36} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+        {/* bottom-left */}
+        <line x1={cardX} y1={cardY + cardH - 36} x2={cardX} y2={cardY + cardH} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+        <line x1={cardX} y1={cardY + cardH} x2={cardX + 36} y2={cardY + cardH} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+        {/* bottom-right */}
+        <line x1={cardX + cardW - 36} y1={cardY + cardH} x2={cardX + cardW} y2={cardY + cardH} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+        <line x1={cardX + cardW} y1={cardY + cardH - 36} x2={cardX + cardW} y2={cardY + cardH} stroke={borderColor} strokeWidth={hairline * 2.5} opacity={borderAlpha} />
+      </svg>
+
+      {/* Optional label below frame */}
+      {label ? (
+        <div style={{
+          position: "absolute",
+          left: cardX,
+          top: cardY + cardH + (isLand ? 14 : 18),
+          width: cardW,
+          textAlign: "center",
+          opacity: labelAlpha,
+        }}>
+          <div style={{
+            fontFamily: F_COND, fontWeight: 700, fontSize: isLand ? 20 : 24,
+            letterSpacing: 5, color: C.cream, opacity: 0.85,
+            textShadow: "0 1px 6px rgba(0,0,0,0.9)",
+          }}>{label}</div>
+        </div>
+      ) : null}
+    </AbsoluteFill>
+  );
+};
+
 const Big: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -604,13 +967,14 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
   const f = useCurrentFrame();
   const {width, height} = useVideoConfig();
   const isLand = width > height;
+  // Whole phrase fades in quickly as a unit (no word-by-word delay)
+  const inn = interpolate(f, [0, 5], [0, 1], {...clamp, easing: Easing.out(Easing.cubic)});
   const out = interpolate(f, [dur - 4, dur], [1, 0], clamp);
-  const inn = interpolate(f, [0, 4], [0, 1], clamp);
   const longest = Math.max(...cue.lines.map((ln: any[]) => ln.map((x: any) => x.w).join(" ").length), 1);
   const fs = Math.max(isLand ? 28 : 32, Math.min(isLand ? 40 : 50, (isLand ? 1400 : 840) / (longest * 0.66)));
   const lh = Math.round(fs * 1.3);
   return (
-    <AbsoluteFill style={{fontFamily: F_DISPLAY, opacity: out * inn}}>
+    <AbsoluteFill style={{fontFamily: F_DISPLAY, opacity: inn * out}}>
       <div style={{
         position: "absolute", left: 0, right: 0, bottom: 0, height: isLand ? 300 : 420,
         background: "linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.18) 30%, rgba(0,0,0,0.42) 72%, rgba(0,0,0,0.56) 100%)",
@@ -622,18 +986,19 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
           display: "flex", flexDirection: "column", alignItems: "center", gap: 2, textAlign: "center",
         }}>
           {cue.lines.map((ln: any[], li: number) => (
-            <div key={li} style={{display: "flex", justifyContent: "center", gap: fs * 0.28, whiteSpace: "nowrap"}}>
+            <div key={li} style={{display: "flex", justifyContent: "center", gap: fs * 0.28, flexWrap: "nowrap", whiteSpace: "nowrap"}}>
               {ln.map((wd: any, wi: number) => {
-                const st = Math.round((wd.t0 - cue.s) * fps);
-                const sp = spring({frame: f - st, fps, config: {damping: 18, stiffness: 190, mass: 0.6}});
-                const pp = Math.min(1, Math.max(0, sp));
+                // Determine if this word is currently the active spoken word
+                const wordStart = Math.round((wd.t0 - cue.s) * fps);
+                const wordEnd = Math.round((wd.t1 - cue.s) * fps);
+                const isActive = f >= wordStart && f < wordEnd + 4;
+                // All words visible from frame 0, full white; active word gets gold highlight
                 return (
                   <div key={wi} style={{
-                    fontWeight: 600, fontSize: fs, lineHeight: `${lh}px`,
-                    color: wd.kw ? C.orange : "#FFFFFF",
-                    opacity: f >= st ? Math.min(1, pp * 2.2) : 0,
-                    transform: `translateY(${(1 - pp) * 8}px)`,
+                    fontWeight: 700, fontSize: fs, lineHeight: `${lh}px`,
+                    color: (wd.kw || isActive) ? C.orange : "#FFFFFF",
                     textShadow: SUB_SHADOW,
+                    transition: "color 0.05s",
                   } as any}>{wd.w}</div>
                 );
               })}
@@ -648,6 +1013,7 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
 const REG: any = {
   big: Big, lower: Lower, stat: Stat, list: List, quote: List, solid: Solid,
   icon: Icon, qmark: QMark, map: MapToText,
+  cover_story: CoverStory, headline_wall: HeadlineWall, chart_grow: ChartGrow, frame_break: FrameBreak,
 };
 
 export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], captions = [], theme = null}) => {

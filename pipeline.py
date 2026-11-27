@@ -31,7 +31,8 @@ FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
 OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
 SKIP_PREFIXES = ("output_", "short_", "long_")
-ALLOWED_OVERLAY_TYPES = {"big", "lower", "stat", "stat_callout", "list", "icon", "qmark", "quote", "solid"}
+ALLOWED_OVERLAY_TYPES = {"big", "lower", "stat", "stat_callout", "list", "icon", "qmark", "quote", "solid",
+                        "cover_story", "headline_wall", "chart_grow", "frame_break"}
 TARGET_LUFS = -16.0
 
 THEMES = {
@@ -489,11 +490,46 @@ def _normalize_overlay_type(o: dict) -> dict:
             if cl:
                 lines.append(cl)
         o["lines"] = lines
+    elif t == "cover_story":
+        o["kicker"] = _clean_overlay_text(o.get("kicker") or o.get("badge") or "LAPORAN KHUSUS", max_words=4, max_chars=28).upper()
+        lines = []
+        for l in (o.get("lines") or [])[:3]:
+            cl = _clean_overlay_text(l, max_words=6, max_chars=36).upper()
+            if cl:
+                lines.append(cl)
+        if not lines and o.get("title"):
+            cl = _clean_overlay_text(o["title"], max_words=6, max_chars=36).upper()
+            if cl:
+                lines = [cl]
+        o["lines"] = lines
+        if o.get("sub"):
+            o["sub"] = _clean_overlay_text(o["sub"], max_words=5, max_chars=32).upper()
+    elif t == "headline_wall":
+        headlines = []
+        for hl in (o.get("headlines") or o.get("lines") or [])[:3]:
+            cl = _clean_overlay_text(hl, max_words=8, max_chars=56).upper()
+            if cl:
+                headlines.append(cl)
+        if not headlines and o.get("text"):
+            cl = _clean_overlay_text(o["text"], max_words=8, max_chars=56).upper()
+            if cl:
+                headlines = [cl]
+        o["headlines"] = headlines
+        o.pop("lines", None)
+    elif t == "chart_grow":
+        o["title"] = _clean_overlay_text(o.get("title") or o.get("label") or "TREN DATA", max_words=5, max_chars=32).upper()
+        o["value"] = _clean_overlay_text(o.get("value") or "", max_words=3, max_chars=20).upper()
+        # data points: list of numbers, keep as-is
+        if not isinstance(o.get("data"), list):
+            o["data"] = []
+    elif t == "frame_break":
+        o["label"] = _clean_overlay_text(o.get("label") or o.get("text") or "", max_words=5, max_chars=32).upper()
     return o
 
 
 def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float, transcript_text: str = "") -> list:
-    default_dur = {"lower": 2.8 if IS_LONG else 2.4, "icon": 3.2, "qmark": 2.4, "big": 2.8, "solid": 3.2, "stat": 3.6, "quote": 4.2, "list": 4.2, "produk": 4.0}
+    default_dur = {"lower": 2.8 if IS_LONG else 2.4, "icon": 3.2, "qmark": 2.4, "big": 2.8, "solid": 3.2, "stat": 3.6, "quote": 4.2, "list": 4.2, "produk": 4.0,
+                   "cover_story": 2.8, "headline_wall": 2.6, "chart_grow": 3.2, "frame_break": 1.5}
     transcript_nums = _transcript_number_tokens(transcript_text or " ".join(w.get("w", "") for w in words))
     ovs = []
     extra = [{"type": "big", "at": 0.15, "lines": hook_lines, "dur": 2.4 if IS_LONG else 2.0, "sfx": "hit", "_fixed": True}] if hook_lines else []
@@ -604,6 +640,13 @@ def _sanitize_plan(p: dict, transcript_text: str = "") -> dict:
                 continue
             if o.get("type") in ("icon", "qmark") and not o.get("label"):
                 continue
+            if o.get("type") == "cover_story" and not o.get("lines"):
+                continue
+            if o.get("type") == "headline_wall" and not o.get("headlines"):
+                continue
+            ovs.append(o)
+        elif o.get("type") in ("cover_story", "headline_wall", "chart_grow", "frame_break") and "at" in o:
+            # editorial types may use absolute 'at' positioning
             ovs.append(o)
     if not ovs:
         raise ValueError("Tidak ada overlay valid dalam rencana")
@@ -660,6 +703,239 @@ ATURAN WAJIB:
             last_err = e
             print(f"(!) Auto Director percobaan {attempt}/3 gagal: {str(e)[:180]}")
     raise RuntimeError(f"Auto Director gagal setelah 3 percobaan: {last_err}")
+
+
+# ----------------------------------------------------------------------------
+# Editorial Motion Graphic Planner
+# ----------------------------------------------------------------------------
+_EDITORIAL_CYCLE = ["cover_story", "headline_wall", "frame_break", "headline_wall", "chart_grow", "frame_break", "headline_wall"]
+
+def plan_editorial_moments(words: list, units: list, unit_texts: list, dur: float,
+                           transcript_text: str = "", target_count: int = 6) -> list:
+    """Pilih 5-7 momen editorial (cover_story / headline_wall / chart_grow / frame_break)
+    setiap 4-6 detik, sinkron dengan batas kalimat narasi."""
+    transcript_nums = _transcript_number_tokens(transcript_text)
+    # Rekonstruksi unit_texts jika kosong
+    if not unit_texts and units and words:
+        unit_texts = [" ".join(words[a:b][k]["w"] for k in range(b - a)) for a, b in units]
+
+    # Kumpulkan batas awal tiap unit (kalimat) sebagai kandidat timing
+    unit_starts = []
+    for a, b in units:
+        if b > a:
+            t = words[a]["t0"]
+            if t < dur - 1.5:
+                unit_starts.append((t, a, b))
+
+    if not unit_starts:
+        return []
+
+    MIN_GAP = 4.0
+    selected: list = []
+    last_t = -MIN_GAP
+
+    for t, a, b in unit_starts:
+        if t - last_t < MIN_GAP:
+            continue
+        if len(selected) >= target_count:
+            break
+        selected.append((t, a, b))
+        last_t = t
+
+    # Pastikan minimal ada cover_story di awal (t ~ 0)
+    if selected and selected[0][0] > 2.0 and unit_starts:
+        # coba sisipkan unit pertama
+        t0, a0, b0 = unit_starts[0]
+        if not selected or selected[0][0] != t0:
+            selected.insert(0, (t0, a0, b0))
+        selected = selected[:target_count]
+
+    moments = []
+    cycle_idx = 0
+    for idx, (t, a, b) in enumerate(selected):
+        # Tentukan tipe berdasarkan siklus
+        etype = _EDITORIAL_CYCLE[cycle_idx % len(_EDITORIAL_CYCLE)]
+        cycle_idx += 1
+
+        # chart_grow hanya boleh jika ada angka di transkrip
+        if etype == "chart_grow" and not transcript_nums:
+            etype = "headline_wall"
+
+        unit_words = words[a:b]
+        snippet = " ".join(w["w"] for w in unit_words[:8])
+        snippet_words = snippet.split()
+
+        if etype == "cover_story":
+            # Pakai 2-5 kata pertama unit sebagai judul, sisanya sebagai sub
+            title_words = snippet_words[:5]
+            sub_words = snippet_words[5:9] if len(snippet_words) > 5 else []
+            lines = [" ".join(title_words).upper()]
+            if sub_words:
+                lines.append(" ".join(sub_words).upper())
+            m = {
+                "type": "cover_story",
+                "at": t,
+                "kicker": "LAPORAN KHUSUS",
+                "lines": lines,
+                "dur": 2.8,
+            }
+        elif etype == "headline_wall":
+            # Ambil sampai 3 unit teks terdekat sebagai headline strips
+            u_idx = next((i for i, (u_a, u_b) in enumerate(units) if u_a == a), 0)
+            hls = []
+            for ui in range(u_idx, min(u_idx + 3, len(units))):
+                ua, ub = units[ui]
+                txt = " ".join(words[ua:ub][k]["w"] for k in range(min(8, ub - ua)))
+                cl = _clean_overlay_text(txt, max_words=7, max_chars=52).upper()
+                if cl:
+                    hls.append(cl)
+            if not hls:
+                hls = [snippet[:52].upper()]
+            m = {
+                "type": "headline_wall",
+                "at": t,
+                "headlines": hls[:3],
+                "dur": 2.6,
+            }
+        elif etype == "chart_grow":
+            # Ambil angka pertama dari transkrip untuk value label
+            nums_list = sorted(transcript_nums)
+            val = nums_list[0] if nums_list else ""
+            m = {
+                "type": "chart_grow",
+                "at": t,
+                "title": _clean_overlay_text(snippet, max_words=4, max_chars=28).upper(),
+                "value": val,
+                "data": [],  # default upward trend
+                "dur": 3.2,
+            }
+        else:  # frame_break
+            lbl = _clean_overlay_text(snippet, max_words=4, max_chars=28).upper()
+            m = {
+                "type": "frame_break",
+                "at": t,
+                "label": lbl,
+                "dur": 1.5,
+            }
+
+        moments.append(m)
+
+    return moments
+
+
+# ----------------------------------------------------------------------------
+# Synthesized Documentary SFX (pure Python wave/math/struct)
+# ----------------------------------------------------------------------------
+import wave
+import struct
+import math as _math
+import random as _random
+
+
+def _write_wav(path: str, samples: list, sr: int = 44100, channels: int = 1):
+    """Tulis list float [-1,1] ke file WAV 16-bit."""
+    n = len(samples)
+    with wave.open(path, "w") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        for s in samples:
+            v = max(-32767, min(32767, int(s * 32767)))
+            wf.writeframes(struct.pack("<h", v))
+
+
+def _synth_sub_pulse(path: str, sr: int = 44100):
+    """sub_pulse.wav: ~0.35s sapuan bass hangat 70Hz->42Hz (untuk cover_story & frame_break)."""
+    dur = 0.35
+    n = int(dur * sr)
+    samples = []
+    for i in range(n):
+        t = i / sr
+        env = _math.sin(_math.pi * t / dur) ** 0.5  # half-sine envelope
+        freq = 70.0 - (70.0 - 42.0) * (t / dur)
+        # accumulate phase manually for smooth sweep
+        # use simple sin with instantaneous freq
+        phase = 2 * _math.pi * (70.0 * t - (70.0 - 42.0) * t * t / (2 * dur))
+        sig = _math.sin(phase) * env
+        # add slight 2nd harmonic warmth
+        sig += 0.18 * _math.sin(2 * phase) * env
+        # low-pass feel: gentle clipping
+        sig = _math.tanh(sig * 1.2) / 1.2
+        samples.append(sig * 0.72)
+    # stereo
+    stereo = []
+    for s in samples:
+        stereo.append(s)
+        stereo.append(s)
+    _write_wav(path, stereo, sr, channels=2)
+
+
+def _synth_marker_sweep(path: str, sr: int = 44100):
+    """marker_sweep.wav: ~0.25s sapuan tekstur halus (untuk headline_wall)."""
+    dur = 0.25
+    n = int(dur * sr)
+    rng = _random.Random(42)
+    samples = []
+    for i in range(n):
+        t = i / sr
+        env = t / dur * _math.exp(-t / (dur * 0.4))
+        env = max(0.0, env)
+        # noise sweep: white noise filtered by rising freq window
+        noise = rng.uniform(-1, 1)
+        freq_center = 800 + 2400 * (t / dur)
+        # simple resonant feel: sin at center freq modulated by noise
+        tone = _math.sin(2 * _math.pi * freq_center * t) * 0.4
+        sig = (noise * 0.6 + tone) * env
+        samples.append(sig * 0.55)
+    stereo = []
+    for s in samples:
+        stereo.append(s)
+        stereo.append(s)
+    _write_wav(path, stereo, sr, channels=2)
+
+
+def _synth_editorial_tick(path: str, sr: int = 44100):
+    """editorial_tick.wav: ~0.08s ketukan taktil redam (untuk chart_grow)."""
+    dur = 0.08
+    n = int(dur * sr)
+    samples = []
+    for i in range(n):
+        t = i / sr
+        env = _math.exp(-t / 0.018)
+        # click: mix of a sharp transient + short pitched tone
+        click = (_random.Random(i).uniform(-1, 1) if i < int(0.004 * sr) else 0.0) * 0.6
+        tone = _math.sin(2 * _math.pi * 1200 * t) * 0.5
+        sig = (click + tone) * env
+        samples.append(sig * 0.65)
+    stereo = []
+    for s in samples:
+        stereo.append(s)
+        stereo.append(s)
+    _write_wav(path, stereo, sr, channels=2)
+
+
+def generate_editorial_sfx(work_dir: str) -> dict:
+    """Generate semua SFX ke /tmp dan return dict path per tipe."""
+    sfx_map = {}
+    for name, fn in [
+        ("sub_pulse", _synth_sub_pulse),
+        ("marker_sweep", _synth_marker_sweep),
+        ("editorial_tick", _synth_editorial_tick),
+    ]:
+        p = os.path.join(work_dir, f"{name}.wav")
+        fn(p)
+        sfx_map[name] = p
+        print(f"SFX synthesized: {name}.wav -> {p}")
+    return sfx_map
+
+
+# Mapping tipe overlay ke SFX
+EDITORIAL_SFX_MAP = {
+    "cover_story": "sub_pulse",
+    "frame_break": "sub_pulse",
+    "headline_wall": "marker_sweep",
+    "chart_grow": "editorial_tick",
+}
 
 
 # ----------------------------------------------------------------------------
@@ -924,7 +1200,15 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
 
     caps = build_captions(words, units, keywords, dur)
     transcript_text = state.get("text") or " ".join(w.get("w", "") for w in words)
-    ovs = lock_overlays(words, overlays_raw, hook_lines, cta_text, dur, transcript_text=transcript_text)
+
+    # Tambahkan editorial moments otomatis (5-7 momen per ~40s)
+    target_editorial = max(5, min(7, int(dur / 6)))
+    editorial_moments = plan_editorial_moments(words, units, state.get("unit_texts", []), dur,
+                                               transcript_text=transcript_text, target_count=target_editorial)
+    combined_overlays = list(overlays_raw) + editorial_moments
+    print(f"[editorial] {len(editorial_moments)} momen editorial ditambahkan. Total overlay: {len(combined_overlays)}")
+
+    ovs = lock_overlays(words, combined_overlays, hook_lines, cta_text, dur, transcript_text=transcript_text)
     sfx_ev = sorted({round(o["t0"], 2) for o in ovs if o.get("sfx")})
 
     clips = [
@@ -1123,24 +1407,65 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
 
     overlay_file, used_codec = render_overlay()
 
-    # --- SFX + mix audio ---
+    # --- Synthesized Documentary SFX + mix audio ---
     SR = 48000
-    rng = np.random.default_rng(7)
-    n_hit = int(0.25 * SR)
-    t_arr = np.arange(n_hit) / SR
-    br = np.cumsum(rng.standard_normal(n_hit))
-    br = (br - np.linspace(br[0], br[-1], n_hit))
-    br = br / np.max(np.abs(br))
-    nz = sosfilt(butter(2, 500, "low", fs=SR, output="sos"), br) * np.exp(-t_arr / 0.05)
-    hit = (np.sin(2 * np.pi * 70 * t_arr) * np.exp(-t_arr / 0.06) * 0.8 + nz * 0.5)
-    hit = (hit / np.max(np.abs(hit)) * 0.9) * (10 ** (-12 / 20))
+    # Generate per-tipe SFX files (pure Python, no external downloads)
+    sfx_files = generate_editorial_sfx(work_dir)
 
-    stem = np.zeros(int(dur * SR) + SR)
-    for t_ev in sfx_ev:
-        st = int(t_ev * SR)
-        if st < len(stem):
-            seg = hit[:len(stem) - st]
-            stem[st:st + len(seg)] += seg
+    # Build timeline events: list of (timestamp, sfx_name) with 1.8s cooldown
+    SFX_COOLDOWN = 1.8
+    sfx_events: list = []
+    last_sfx_t = -SFX_COOLDOWN
+
+    # Collect from overlay types (editorial types) + legacy sfx="hit"
+    ov_sorted = sorted(ovs, key=lambda o: o["t0"])
+    for o in ov_sorted:
+        t_ev = round(o["t0"], 3)
+        otype = o.get("type", "")
+        sfx_name = EDITORIAL_SFX_MAP.get(otype)
+        if sfx_name is None and o.get("sfx"):
+            # legacy hit -> sub_pulse fallback
+            sfx_name = "sub_pulse"
+        if sfx_name and (t_ev - last_sfx_t) >= SFX_COOLDOWN:
+            sfx_events.append((t_ev, sfx_name))
+            last_sfx_t = t_ev
+
+    print(f"[sfx] {len(sfx_events)} cue SFX (cooldown={SFX_COOLDOWN}s): {[(round(t,2), s) for t, s in sfx_events]}")
+
+    # Load SFX files via scipy for precise mixing
+    stem_total = int(dur * SR) + SR
+    stem = np.zeros(stem_total, dtype=np.float32)
+    SFX_DB = -20.0  # -20 dB di bawah VO
+    sfx_gain = 10 ** (SFX_DB / 20.0)
+
+    for t_ev, sfx_name in sfx_events:
+        sfx_path = sfx_files.get(sfx_name)
+        if not sfx_path or not os.path.exists(sfx_path):
+            continue
+        try:
+            sfx_sr, sfx_data = wavfile.read(sfx_path)
+            # sfx_data is int16, convert to float32
+            if sfx_data.dtype == np.int16:
+                sfx_arr = sfx_data.astype(np.float32) / 32768.0
+            else:
+                sfx_arr = sfx_data.astype(np.float32)
+            # resample if needed
+            if sfx_sr != SR:
+                ratio = SR / sfx_sr
+                n_out = int(len(sfx_arr) * ratio)
+                sfx_arr = np.interp(np.linspace(0, len(sfx_arr) - 1, n_out), np.arange(len(sfx_arr)), sfx_arr[:, 0] if sfx_arr.ndim > 1 else sfx_arr)
+                sfx_arr = np.stack([sfx_arr, sfx_arr], axis=1) if sfx_data.ndim == 1 else sfx_arr
+            # Mix left channel only into mono stem
+            mono = sfx_arr[:, 0] if sfx_arr.ndim > 1 else sfx_arr
+            mono = mono * sfx_gain
+            st = int(t_ev * SR)
+            end = min(st + len(mono), stem_total)
+            if st < stem_total:
+                seg = mono[:end - st]
+                stem[st:st + len(seg)] += seg
+        except Exception as e:
+            print(f"[sfx] gagal mix {sfx_name} @ {t_ev:.2f}s: {e}")
+
     stem = stem[:int(dur * SR)]
     stem_wav = os.path.join(work_dir, "SFX_stem.wav")
     wavfile.write(stem_wav, SR, np.stack([stem, stem], 1).astype(np.float32))
