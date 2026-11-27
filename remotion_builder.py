@@ -5,7 +5,7 @@ OUT_W = 1920 if IS_LONG else 1080
 OUT_H = 1080 if IS_LONG else 1920
 
 REMO_FILES = {
-    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352","@remotion/motion-blur":"4.0.352"}}""",
+    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352","@remotion/motion-blur":"4.0.352","@remotion/transitions":"4.0.352"}}""",
     "tsconfig.json": r"""{"compilerOptions":{"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":false,"skipLibCheck":true,"esModuleInterop":true,"noEmit":true},"include":["src"]}""",
     "src/index.ts": r"""import {registerRoot} from "remotion";
 import {CameraMotionBlur} from "@remotion/motion-blur";
@@ -180,6 +180,25 @@ const HighlightedSentence: React.FC<any> = ({text, delay = 6, color, ink}) => {
 // ----------------------------------------------------------------------------
 // 0. ROTO_TYPO: Tipografi raksasa di BELAKANG subjek (layered rotoscoping)
 // ----------------------------------------------------------------------------
+
+const CameraRig: React.FC<{children: React.ReactNode}> = ({children}) => {
+  const f = useCurrentFrame();
+  const panX = Math.sin(f * 0.035) * 6;
+  const panY = Math.cos(f * 0.028) * 5;
+  const rot = Math.sin(f * 0.022) * 0.35;
+  const zoom = 1.01 + Math.sin(f * 0.03) * 0.008;
+  return (
+    <div style={{
+      position: "absolute",
+      inset: 0,
+      transform: `translate3d(${panX}px, ${panY}px, 0) rotate(${rot}deg) scale(${zoom})`,
+      transformOrigin: "center center",
+    }}>
+      {children}
+    </div>
+  );
+};
+
 const RotoTypo: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -622,6 +641,7 @@ export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], ca
     <ThemeCtx.Provider value={C}>
       <CfgCtx.Provider value={cfg}>
         <AbsoluteFill style={vars}>
+          <CameraRig>
           <CameraMotionBlur samples={6} shutterAngle={150}>
             {overlays.map((o: any, i: number) => {
               const from = Math.round(o.t0 * fps);
@@ -634,6 +654,7 @@ export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], ca
               );
             })}
           </CameraMotionBlur>
+          </CameraRig>
           {captions.map((c: any, i: number) => {
             const from = Math.round(c.s * fps);
             const dur = Math.max(4, Math.round((c.e - c.s) * fps));
