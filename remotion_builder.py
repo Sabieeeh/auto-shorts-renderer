@@ -289,6 +289,70 @@ const StatCounter: React.FC<any> = ({o, dur}) => {
   );
 };
 
+
+// ----------------------------------------------------------------------------
+// DRAW_ON: Coretan lingkaran, garis bawah, & panah vektor terlukis otomatis
+// ----------------------------------------------------------------------------
+const DrawOn: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const p = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR_FLOAT})));
+
+  const shape = o.shape || "circle"; // "circle" | "underline" | "arrow"
+  const label = (o.label || o.text || "").toUpperCase();
+  const paths: Record<string, string> = {
+    circle: "M 350 40 C 560 35, 650 110, 640 190 C 630 270, 480 310, 330 305 C 160 300, 60 245, 70 165 C 80 85, 220 35, 385 45",
+    underline: "M 70 210 Q 350 185 630 205 M 110 235 Q 360 215 590 232",
+    arrow: "M 110 250 Q 260 110 540 125 M 485 85 L 550 126 L 490 172",
+  };
+  const d = paths[shape] || paths.circle;
+  const evo = evolvePath(p, d);
+
+  const boxH = isLand ? 420 : 520;
+  const boxTop = Math.round(zoneMid(isLand) - boxH / 2);
+
+  return (
+    <MotionStage dur={dur}>
+      <div style={{
+        position: "absolute", left: 40, right: 40, top: boxTop, height: boxH,
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      }}>
+        <svg width="700" height="340" viewBox="0 0 700 340" style={{overflow: "visible"}}>
+          <path
+            d={d}
+            fill="none"
+            stroke={C.orange}
+            strokeWidth={12}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeDasharray={evo.strokeDasharray}
+            strokeDashoffset={evo.strokeDashoffset}
+            style={{filter: "drop-shadow(0 8px 18px rgba(0,0,0,0.85))"}}
+          />
+        </svg>
+        {label ? (
+          <div style={{
+            position: "absolute",
+            fontFamily: F_COND, fontWeight: 700,
+            fontSize: isLand ? 76 : 84, lineHeight: 1.05, letterSpacing: 1.5,
+            color: C.cream,
+            WebkitTextStroke: `5px ${C.black}`,
+            paintOrder: "stroke fill",
+            textShadow: "0 10px 28px rgba(0,0,0,0.9)",
+            textAlign: "center",
+            opacity: p,
+            transform: `scale(${0.9 + p * 0.1})`,
+          }}>
+            {label}
+          </div>
+        ) : null}
+      </div>
+    </MotionStage>
+  );
+};
+
 const RotoTypo: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -707,6 +771,7 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
 // Registrasi komponen baru + pemetaan otomatis jika ada tipe lama dari cache
 const REG: any = {
   roto_typo: RotoTypo,
+  draw_on: DrawOn,
   stat_counter: StatCounter,
   kinetic_typo: KineticTypo,
   marker_quote: MarkerQuote,
