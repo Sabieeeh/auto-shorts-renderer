@@ -159,17 +159,17 @@ def motion_filter(fr: int, drift: float, kin, kout) -> str:
         terms.append(f"{0.22 if kout == 'zoom' else 0.26}*pow({pr},2)")
         if kout == "whip":
             xs.append(f"+0.075*iw*pow({pr},2)")
-            blurs.append(f"gblur=sigma=28:sigmaV=0.01:enable='gt(n,{fr - n - 1})'")
+            pass  # hard-cut bersih tanpa efek buram
         else:
-            blurs.append(f"gblur=sigma=10:enable='gt(n,{fr - n - 1})'")
+            pass  # hard-cut bersih tanpa efek buram
     if kin:
         pr = f"max(0,({n}-on)/{n})"
         terms.append(f"{0.22 if kin == 'zoom' else 0.26}*pow({pr},2)")
         if kin == "whip":
             xs.append(f"-0.075*iw*pow({pr},2)")
-            blurs.append(f"gblur=sigma=28:sigmaV=0.01:enable='lt(n,{n})'")
+            pass  # hard-cut bersih tanpa efek buram
         else:
-            blurs.append(f"gblur=sigma=10:enable='lt(n,{n})'")
+            pass  # hard-cut bersih tanpa efek buram
     z = "1+" + "+".join(terms) if terms else "1"
     x = "iw/2-(iw/zoom/2)" + "".join(xs)
     zp = f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}"
@@ -420,12 +420,13 @@ def _normalize_overlay_type(o: dict) -> dict:
         o["type"] = "floating_card"
         o["badge"] = str(o.get("title") or "POIN UTAMA").upper()
         o["value"] = (first_txt or "FAKTA PENTING").upper()
-        o["label"] = f"{len(items)} POIN SOROTAN" if len(items) > 1 else ""
+        o["label"] = ""
         return o
 
     if t == "stat":
         o["type"] = "floating_card"
-        o["badge"] = str(o.get("badge") or "SOROTAN DATA").upper()
+        o["badge"] = ""
+        if o.get("type") == "floating_card": o["type"] = "kinetic_typo"
         return o
 
     if t in ("icon", "map"):

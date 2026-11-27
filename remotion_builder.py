@@ -588,7 +588,7 @@ const FloatingCard: React.FC<any> = ({o, dur}) => {
 
   const valueTxt = up(o.value || o.title || o.text || (Array.isArray(o.lines) ? o.lines[0] : "DATA"));
   const subTxt = up(o.label || o.sub || (Array.isArray(o.lines) && o.lines[1] ? o.lines[1] : ""));
-  const badgeTxt = up(o.badge || "SOROTAN DATA");
+  const badgeTxt = up(o.badge || "");
 
   const cardW = isLand ? 1060 : 880;
   const cardH = isLand ? 360 : 420;
@@ -777,7 +777,7 @@ const REG: any = {
   stat_counter: StatCounter,
   kinetic_typo: KineticTypo,
   marker_quote: MarkerQuote,
-  floating_card: FloatingCard,
+  floating_card: KineticTypo,
   camera_beat: CameraBeat,
   // Fallback kompatibilitas plan lama:
   big: KineticTypo,
