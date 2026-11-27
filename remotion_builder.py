@@ -5,9 +5,10 @@ OUT_W = 1920 if IS_LONG else 1080
 OUT_H = 1080 if IS_LONG else 1920
 
 REMO_FILES = {
-    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352"}}""",
+    "package.json": r"""{"name":"overlay","version":"1.0.0","private":true,"dependencies":{"remotion":"4.0.352","@remotion/cli":"4.0.352","react":"18.3.1","react-dom":"18.3.1","@remotion/google-fonts":"4.0.352","@remotion/motion-blur":"4.0.352"}}""",
     "tsconfig.json": r"""{"compilerOptions":{"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":false,"skipLibCheck":true,"esModuleInterop":true,"noEmit":true},"include":["src"]}""",
     "src/index.ts": r"""import {registerRoot} from "remotion";
+import {CameraMotionBlur} from "@remotion/motion-blur";
 import {Root} from "./Root";
 registerRoot(Root);
 """,
@@ -621,16 +622,18 @@ export const Overlay: React.FC<any> = ({overlays = [], fps = 30, images = [], ca
     <ThemeCtx.Provider value={C}>
       <CfgCtx.Provider value={cfg}>
         <AbsoluteFill style={vars}>
-          {overlays.map((o: any, i: number) => {
-            const from = Math.round(o.t0 * fps);
-            const dur = Math.max(6, Math.round((o.t1 - o.t0) * fps));
-            const Comp = REG[o.type] || KineticTypo;
-            return (
-              <Sequence key={i} from={from} durationInFrames={dur}>
-                <Comp o={o} dur={dur} images={images} />
-              </Sequence>
-            );
-          })}
+          <CameraMotionBlur samples={6} shutterAngle={150}>
+            {overlays.map((o: any, i: number) => {
+              const from = Math.round(o.t0 * fps);
+              const dur = Math.max(6, Math.round((o.t1 - o.t0) * fps));
+              const Comp = REG[o.type] || KineticTypo;
+              return (
+                <Sequence key={i} from={from} durationInFrames={dur}>
+                  <Comp o={o} dur={dur} images={images} />
+                </Sequence>
+              );
+            })}
+          </CameraMotionBlur>
           {captions.map((c: any, i: number) => {
             const from = Math.round(c.s * fps);
             const dur = Math.max(4, Math.round((c.e - c.s) * fps));
