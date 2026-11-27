@@ -175,6 +175,66 @@ const HighlightedSentence: React.FC<any> = ({text, delay = 6, color, ink}) => {
 // ----------------------------------------------------------------------------
 // 1. KINETIC_TYPO: Tipografi berlapis dengan parallax & garis pemindai hidup
 // ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// 0. ROTO_TYPO: Tipografi raksasa di BELAKANG subjek (layered rotoscoping)
+// ----------------------------------------------------------------------------
+const RotoTypo: React.FC<any> = ({o, dur}) => {
+  const C = useC();
+  const f = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const isLand = width > height;
+  const rawLines = Array.isArray(o.lines) && o.lines.length ? o.lines : [o.text || "SOROTAN"];
+  const lines = wrapLines(rawLines, isLand ? 18 : 11);
+  const bgDim = interpolate(f, [0, 8], [0, 1], clamp);
+  const pulse = 1 + Math.sin(f * 0.08) * 0.015;
+  const boxH = isLand ? 560 : 760;
+  const boxTop = Math.round(zoneMid(isLand) - boxH / 2);
+
+  return (
+    <MotionStage dur={dur}>
+      {/* Lapisan 1: Redup lokal + pola titik halftone halus */}
+      <div style={{
+        position: "absolute", inset: 0, opacity: bgDim * 0.65,
+        backgroundImage: "radial-gradient(rgba(255,255,255,0.14) 1.5px, transparent 1.5px)",
+        backgroundSize: "26px 26px",
+      }} />
+      {/* Lapisan 2: Tipografi raksasa (berada di belakang subjek) */}
+      <div style={{
+        position: "absolute", left: 40, right: 40, top: boxTop, height: boxH,
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        transform: `scale(${pulse})`,
+      }}>
+        {lines.map((raw, i) => {
+          const l = raw.replace(/^\*/, "");
+          const isAccent = raw.startsWith("*") || i === lines.length - 1;
+          const p = Math.min(1, Math.max(0, spring({frame: f - i * 4, fps, config: SPR_SNAP})));
+          return (
+            <div key={i} style={{
+              fontFamily: F_COND, fontWeight: 700,
+              fontSize: isLand ? 156 : 168, lineHeight: 0.96, letterSpacing: 2,
+              color: isAccent ? C.orange : C.cream,
+              textShadow: "0 12px 40px rgba(0,0,0,0.85)",
+              transform: `translateY(${(1 - p) * 70}px) scale(${0.92 + p * 0.08})`,
+              opacity: p,
+              textAlign: "center",
+            }}>
+              {l}
+            </div>
+          );
+        })}
+      </div>
+      {/* Lapisan 3: Potongan subjek transparan (rotoSrc) di depan teks */}
+      {o.rotoSrc ? (
+        <OffthreadVideo
+          src={staticFile(o.rotoSrc)}
+          style={{position: "absolute", inset: 0, width, height, objectFit: "cover"}}
+        />
+      ) : null}
+    </MotionStage>
+  );
+};
+
 const KineticTypo: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -536,6 +596,7 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
 
 // Registrasi komponen baru + pemetaan otomatis jika ada tipe lama dari cache
 const REG: any = {
+  roto_typo: RotoTypo,
   kinetic_typo: KineticTypo,
   marker_quote: MarkerQuote,
   floating_card: FloatingCard,

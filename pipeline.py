@@ -23,15 +23,15 @@ IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 VID_EXT = (".mov", ".mp4")
 STILL_DUR = 5.0
 STILL_KB_END = 1.08
-DRIFT = 0.06
-CUT_FRAMES = 6
+DRIFT = 0.025
+CUT_FRAMES = 4
 GRAIN = 3
 FINAL_CRF = 22 if IS_LONG else 23
 FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
 OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
 SKIP_PREFIXES = ("output_", "short_", "long_")
-ALLOWED_OVERLAY_TYPES = {"kinetic_typo", "marker_quote", "floating_card", "camera_beat"}
+ALLOWED_OVERLAY_TYPES = {"roto_typo", "kinetic_typo", "marker_quote", "floating_card", "camera_beat"}
 TARGET_LUFS = -16.0
 
 THEMES = {
@@ -140,8 +140,11 @@ def prepare_still_clips(clips: list, work_dir: str) -> list:
     return clips
 
 
-def cut_kind(i: int) -> str:
-    return "zoom" if i % 2 == 0 else "whip"
+def cut_kind(i: int):
+    """Hard-cut bersih pada 80% potongan; transisi halus hanya tiap 5 shot sekali agar nyaman di mata."""
+    if i <= 0 or i % 5 != 0:
+        return None
+    return "zoom"
 
 
 def motion_filter(fr: int, drift: float, kin, kout) -> str:
@@ -555,6 +558,36 @@ def _sanitize_plan(p: dict) -> dict:
     }
 
 
+
+def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonnet-4-6") -> dict:
+    """Gunakan GEMINI_API_KEY (gratis) terlebih dahulu jika tersedia, lalu Claude, lalu fallback lokal."""
+    import urllib.request
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+            body = json.dumps({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.4},
+            }).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            txt = data["candidates"][0]["content"]["parts"][0]["text"]
+            return _parse_json_loose(txt)
+        except Exception as e:
+            print(f"(!) Gemini API dilewati ({str(e)[:140]}), beralih ke cadangan...")
+
+    if anthropic_client is not None:
+        resp = anthropic_client.messages.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _parse_json_loose(_extract_claude_text(resp))
+
+    raise RuntimeError("Tidak ada API key aktif")
+
 def run_auto_director(client: anthropic.Anthropic, text: str, style_note: str, project_note: str, model: str = "claude-sonnet-4-6") -> dict:
     note_combined = style_note
     if project_note.strip():
@@ -588,12 +621,7 @@ ATURAN WAJIB:
     last_err = None
     for attempt in range(1, 4):
         try:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": dir_prompt}],
-            )
-            return _sanitize_plan(_parse_json_loose(_extract_claude_text(resp)))
+            return _sanitize_plan(_call_llm_json(dir_prompt, anthropic_client=client, model=model))
         except Exception as e:
             last_err = e
             print(f"(!) Auto Director percobaan {attempt}/3 gagal: {str(e)[:180]}")
