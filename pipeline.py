@@ -571,13 +571,21 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
             continue
         ovs.append(o)
 
-    prio = {"stat": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3}
+    prio = {"stat": 0, "list": 0, "quote": 0, "lower": 1, "big": 2, "qmark": 3, "icon": 3, "solid": 3,
+            "cover_story": 0, "headline_wall": 0, "chart_grow": 0, "frame_break": 1}
+    _EDITORIAL_TYPES = frozenset({"cover_story", "headline_wall", "chart_grow", "frame_break"})
+    # Editorial types are designed to trigger every 4-6s; use a tighter gap for them
+    EDITORIAL_MIN_GAP = 3.5
 
     def _span(o):
         return o["t0"], o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8))
 
     def _clash(a, b):
         (a0, a1), (b0, b1) = _span(a), _span(b)
+        # Both editorial: use tighter gap (target 4-6s pacing from AGENTS.md)
+        if a.get("type") in _EDITORIAL_TYPES and b.get("type") in _EDITORIAL_TYPES:
+            # editorial: tidak boleh bertumpuk, dan jarak antar-awal minimal EDITORIAL_MIN_GAP
+            return (a0 < b1 and b0 < a1) or abs(a0 - b0) < EDITORIAL_MIN_GAP
         return a0 < b1 + OVERLAY_MIN_GAP and b0 < a1 + OVERLAY_MIN_GAP
 
     kept = [o for o in ovs if o.get("_fixed")]
@@ -585,8 +593,9 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
         if len(kept) >= OVERLAY_MAX:
             print(f"[overlay] dilewati (melebihi batas {OVERLAY_MAX}): {o['type']} @ {o['t0']:.1f}s")
             continue
-        if any(_clash(o, k) for k in kept):
-            print(f"[overlay] dilewati (terlalu rapat, jeda < {OVERLAY_MIN_GAP:.0f}s): {o['type']} @ {o['t0']:.1f}s")
+        blk = next((k for k in kept if _clash(o, k)), None)
+        if blk is not None:
+            print(f"[overlay] dilewati (bentrok dgn {blk['type']} @ {blk['t0']:.1f}s): {o['type']} @ {o['t0']:.1f}s")
             continue
         kept.append(o)
     ovs = kept
@@ -845,24 +854,40 @@ def _write_wav(path: str, samples: list, sr: int = 44100, channels: int = 1):
 
 
 def _synth_sub_pulse(path: str, sr: int = 44100):
-    """sub_pulse.wav: ~0.35s sapuan bass hangat 70Hz->42Hz (untuk cover_story & frame_break)."""
-    dur = 0.35
+    """sub_pulse.wav: ~0.38s sapuan bass hangat 68Hz->40Hz (cover_story — tebal, menggema)."""
+    dur = 0.38
     n = int(dur * sr)
     samples = []
     for i in range(n):
         t = i / sr
-        env = _math.sin(_math.pi * t / dur) ** 0.5  # half-sine envelope
-        freq = 70.0 - (70.0 - 42.0) * (t / dur)
-        # accumulate phase manually for smooth sweep
-        # use simple sin with instantaneous freq
-        phase = 2 * _math.pi * (70.0 * t - (70.0 - 42.0) * t * t / (2 * dur))
+        env = _math.sin(_math.pi * t / dur) ** 0.5
+        phase = 2 * _math.pi * (68.0 * t - (68.0 - 40.0) * t * t / (2 * dur))
         sig = _math.sin(phase) * env
-        # add slight 2nd harmonic warmth
-        sig += 0.18 * _math.sin(2 * phase) * env
-        # low-pass feel: gentle clipping
-        sig = _math.tanh(sig * 1.2) / 1.2
-        samples.append(sig * 0.72)
-    # stereo
+        sig += 0.20 * _math.sin(2 * phase) * env   # 2nd harmonic warmth
+        sig += 0.06 * _math.sin(3 * phase) * env   # subtle 3rd for body
+        sig = _math.tanh(sig * 1.3) / 1.3
+        samples.append(sig * 0.74)
+    stereo = []
+    for s in samples:
+        stereo.append(s)
+        stereo.append(s)
+    _write_wav(path, stereo, sr, channels=2)
+
+
+def _synth_sub_pulse_frame(path: str, sr: int = 44100):
+    """sub_pulse_frame.wav: ~0.22s sapuan mid-bass 90Hz->58Hz (frame_break — lebih singkat & tajam)."""
+    dur = 0.22
+    n = int(dur * sr)
+    samples = []
+    for i in range(n):
+        t = i / sr
+        # sharper attack: power 0.3 for fast transient
+        env = _math.sin(_math.pi * t / dur) ** 0.3
+        phase = 2 * _math.pi * (90.0 * t - (90.0 - 58.0) * t * t / (2 * dur))
+        sig = _math.sin(phase) * env
+        sig += 0.14 * _math.sin(2 * phase) * env
+        sig = _math.tanh(sig * 1.5) / 1.5
+        samples.append(sig * 0.68)
     stereo = []
     for s in samples:
         stereo.append(s)
@@ -871,22 +896,44 @@ def _synth_sub_pulse(path: str, sr: int = 44100):
 
 
 def _synth_marker_sweep(path: str, sr: int = 44100):
-    """marker_sweep.wav: ~0.25s sapuan tekstur halus (untuk headline_wall)."""
-    dur = 0.25
+    """marker_sweep.wav: ~0.28s sapuan tekstur halus 800->3200Hz (headline_wall — sweep utama)."""
+    dur = 0.28
     n = int(dur * sr)
     rng = _random.Random(42)
     samples = []
     for i in range(n):
         t = i / sr
-        env = t / dur * _math.exp(-t / (dur * 0.4))
+        env = (t / dur) * _math.exp(-t / (dur * 0.38))
         env = max(0.0, env)
-        # noise sweep: white noise filtered by rising freq window
         noise = rng.uniform(-1, 1)
         freq_center = 800 + 2400 * (t / dur)
-        # simple resonant feel: sin at center freq modulated by noise
-        tone = _math.sin(2 * _math.pi * freq_center * t) * 0.4
-        sig = (noise * 0.6 + tone) * env
-        samples.append(sig * 0.55)
+        tone = _math.sin(2 * _math.pi * freq_center * t) * 0.42
+        sig = (noise * 0.58 + tone) * env
+        samples.append(sig * 0.56)
+    stereo = []
+    for s in samples:
+        stereo.append(s)
+        stereo.append(s)
+    _write_wav(path, stereo, sr, channels=2)
+
+
+def _synth_marker_sweep_accent(path: str, sr: int = 44100):
+    """marker_sweep_accent.wav: ~0.32s sapuan lebih terang 1200->4000Hz (headline_wall — aksen bergantian)."""
+    dur = 0.32
+    n = int(dur * sr)
+    rng = _random.Random(77)
+    samples = []
+    for i in range(n):
+        t = i / sr
+        env = (t / dur) ** 0.6 * _math.exp(-t / (dur * 0.45))
+        env = max(0.0, env)
+        noise = rng.uniform(-1, 1)
+        freq_center = 1200 + 2800 * (t / dur)
+        tone = _math.sin(2 * _math.pi * freq_center * t) * 0.38
+        # slight pitch flutter for texture
+        flutter = _math.sin(2 * _math.pi * (freq_center * 1.015) * t) * 0.12
+        sig = (noise * 0.50 + tone + flutter) * env
+        samples.append(sig * 0.52)
     stereo = []
     for s in samples:
         stereo.append(s)
@@ -895,16 +942,15 @@ def _synth_marker_sweep(path: str, sr: int = 44100):
 
 
 def _synth_editorial_tick(path: str, sr: int = 44100):
-    """editorial_tick.wav: ~0.08s ketukan taktil redam (untuk chart_grow)."""
-    dur = 0.08
+    """editorial_tick.wav: ~0.09s ketukan taktil redam 1200Hz (chart_grow — single tick)."""
+    dur = 0.09
     n = int(dur * sr)
     samples = []
     for i in range(n):
         t = i / sr
-        env = _math.exp(-t / 0.018)
-        # click: mix of a sharp transient + short pitched tone
-        click = (_random.Random(i).uniform(-1, 1) if i < int(0.004 * sr) else 0.0) * 0.6
-        tone = _math.sin(2 * _math.pi * 1200 * t) * 0.5
+        env = _math.exp(-t / 0.019)
+        click = (_random.Random(i).uniform(-1, 1) if i < int(0.004 * sr) else 0.0) * 0.62
+        tone = _math.sin(2 * _math.pi * 1200 * t) * 0.50
         sig = (click + tone) * env
         samples.append(sig * 0.65)
     stereo = []
@@ -914,13 +960,42 @@ def _synth_editorial_tick(path: str, sr: int = 44100):
     _write_wav(path, stereo, sr, channels=2)
 
 
+def _synth_editorial_tick_long(path: str, sr: int = 44100):
+    """editorial_tick_long.wav: ~0.16s double-tick 1400Hz+900Hz (chart_grow — aksen bergantian, lebih dalam)."""
+    dur = 0.16
+    n = int(dur * sr)
+    samples = []
+    gap = int(0.07 * sr)  # second tick starts at 70ms
+    for i in range(n):
+        t = i / sr
+        # first tick
+        env1 = _math.exp(-t / 0.019) if t < 0.07 else 0.0
+        click1 = (_random.Random(i).uniform(-1, 1) if i < int(0.004 * sr) else 0.0) * 0.60
+        tone1 = _math.sin(2 * _math.pi * 1400 * t) * 0.48
+        # second tick
+        t2 = t - 0.07
+        env2 = _math.exp(-t2 / 0.022) if t2 >= 0 else 0.0
+        click2 = (_random.Random(i + 999).uniform(-1, 1) if gap <= i < gap + int(0.004 * sr) else 0.0) * 0.46
+        tone2 = _math.sin(2 * _math.pi * 900 * t2) * 0.38 if t2 >= 0 else 0.0
+        sig = (click1 + tone1) * env1 + (click2 + tone2) * env2
+        samples.append(sig * 0.60)
+    stereo = []
+    for s in samples:
+        stereo.append(s)
+        stereo.append(s)
+    _write_wav(path, stereo, sr, channels=2)
+
+
 def generate_editorial_sfx(work_dir: str) -> dict:
-    """Generate semua SFX ke /tmp dan return dict path per tipe."""
+    """Generate semua SFX (termasuk varian) ke work_dir; return dict path per key."""
     sfx_map = {}
     for name, fn in [
         ("sub_pulse", _synth_sub_pulse),
+        ("sub_pulse_frame", _synth_sub_pulse_frame),
         ("marker_sweep", _synth_marker_sweep),
+        ("marker_sweep_accent", _synth_marker_sweep_accent),
         ("editorial_tick", _synth_editorial_tick),
+        ("editorial_tick_long", _synth_editorial_tick_long),
     ]:
         p = os.path.join(work_dir, f"{name}.wav")
         fn(p)
@@ -929,13 +1004,28 @@ def generate_editorial_sfx(work_dir: str) -> dict:
     return sfx_map
 
 
-# Mapping tipe overlay ke SFX
-EDITORIAL_SFX_MAP = {
+# Mapping tipe overlay ke SFX — tuple berarti bergantian antara dua varian
+EDITORIAL_SFX_MAP: dict = {
     "cover_story": "sub_pulse",
-    "frame_break": "sub_pulse",
-    "headline_wall": "marker_sweep",
-    "chart_grow": "editorial_tick",
+    "frame_break": "sub_pulse_frame",
+    "headline_wall": ("marker_sweep", "marker_sweep_accent"),   # alternating variants
+    "chart_grow": ("editorial_tick", "editorial_tick_long"),    # alternating variants
 }
+
+# Track alternation index per tipe agar variasi merata sepanjang video
+_sfx_alt_counter: dict = {}
+
+
+def _pick_sfx_name(otype: str) -> str:
+    """Pilih nama SFX untuk tipe overlay; bergantian antara varian bila tersedia."""
+    mapping = EDITORIAL_SFX_MAP.get(otype)
+    if mapping is None:
+        return ""
+    if isinstance(mapping, tuple):
+        idx = _sfx_alt_counter.get(otype, 0)
+        _sfx_alt_counter[otype] = idx + 1
+        return mapping[idx % len(mapping)]
+    return mapping
 
 
 # ----------------------------------------------------------------------------
@@ -1207,9 +1297,11 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
                                                transcript_text=transcript_text, target_count=target_editorial)
     # Buang tipe overlay lama agar 4 gaya editorial (cover_story, headline_wall, chart_grow, frame_break) tampil dominan
     _LEGACY_TYPES = {"qmark", "big", "list", "stat", "lower", "icon", "map", "chapter_title", "stat_callout", "editorial_quote", "keyword_anchor"}
-    clean_base_overlays = [o for o in state.get("overlays", []) if o.get("type") not in _LEGACY_TYPES]
+    clean_base_overlays = [o for o in overlays_raw if o.get("type") not in _LEGACY_TYPES]
     state["overlays"] = editorial_moments + clean_base_overlays
-    combined_overlays = list(overlays_raw) + editorial_moments
+    # Pass only clean (non-legacy) base overlays + editorial moments to lock_overlays
+    # so legacy types cannot crowd out the new editorial styles via the distance filter
+    combined_overlays = editorial_moments + clean_base_overlays
     print(f"[editorial] {len(editorial_moments)} momen editorial ditambahkan. Total overlay: {len(combined_overlays)}")
 
     ovs = lock_overlays(words, combined_overlays, hook_lines, cta_text, dur, transcript_text=transcript_text)
@@ -1422,12 +1514,14 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     last_sfx_t = -SFX_COOLDOWN
 
     # Collect from overlay types (editorial types) + legacy sfx="hit"
+    # Reset alternation counters at the start of each render so variants are deterministic
+    _sfx_alt_counter.clear()
     ov_sorted = sorted(ovs, key=lambda o: o["t0"])
     for o in ov_sorted:
         t_ev = round(o["t0"], 3)
         otype = o.get("type", "")
-        sfx_name = EDITORIAL_SFX_MAP.get(otype)
-        if sfx_name is None and o.get("sfx"):
+        sfx_name = _pick_sfx_name(otype)
+        if not sfx_name and o.get("sfx"):
             # legacy hit -> sub_pulse fallback
             sfx_name = "sub_pulse"
         if sfx_name and (t_ev - last_sfx_t) >= SFX_COOLDOWN:
@@ -1445,6 +1539,7 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     for t_ev, sfx_name in sfx_events:
         sfx_path = sfx_files.get(sfx_name)
         if not sfx_path or not os.path.exists(sfx_path):
+            print(f"[sfx] FILE HILANG untuk {sfx_name} @ {t_ev:.2f}s, dilewati")
             continue
         try:
             sfx_sr, sfx_data = wavfile.read(sfx_path)
