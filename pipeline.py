@@ -586,6 +586,9 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
         if a.get("type") in _EDITORIAL_TYPES and b.get("type") in _EDITORIAL_TYPES:
             # editorial: tidak boleh bertumpuk, dan jarak antar-awal minimal EDITORIAL_MIN_GAP
             return (a0 < b1 and b0 < a1) or abs(a0 - b0) < EDITORIAL_MIN_GAP
+        if a.get("type") in _EDITORIAL_TYPES or b.get("type") in _EDITORIAL_TYPES:
+            # editorial vs overlay non-editorial (mis. hook): cukup tidak bertumpuk + napas 0.5s
+            return a0 < b1 + 0.5 and b0 < a1 + 0.5
         return a0 < b1 + OVERLAY_MIN_GAP and b0 < a1 + OVERLAY_MIN_GAP
 
     kept = [o for o in ovs if o.get("_fixed")]
