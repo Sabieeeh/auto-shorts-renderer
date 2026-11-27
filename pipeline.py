@@ -540,29 +540,87 @@ def _parse_json_loose(txt: str) -> dict:
     return json.loads(txt[a:b + 1])
 
 
+def _clean_hook_line(s: str) -> str:
+    return re.sub(r"[*]+", "", str(s or "")).strip().upper()
+
+
 def _sanitize_plan(p: dict) -> dict:
     if not isinstance(p, dict):
         raise ValueError("Rencana bukan objek JSON")
+
+    raw_scenes = p.get("scenes") or p.get("kalimat") or []
+    scenes = []
     ovs = []
-    for o in p.get("overlays") or []:
-        if not isinstance(o, dict) or o.get("type") not in ALLOWED_OVERLAY_TYPES:
+    kw_pool = []
+
+    for idx, sc in enumerate(raw_scenes, 1):
+        if not isinstance(sc, dict):
             continue
-        if o.get("type") in ("list", "quote") or o.get("trigger"):
-            ovs.append(o)
+        narasi = str(sc.get("narasi") or sc.get("text") or "").strip()
+        visual_literal = str(sc.get("visual_literal") or "").strip()
+        kw = str(sc.get("keyword_cari") or "").strip()
+        try:
+            skor = int(sc.get("skor_penting") or 0)
+        except Exception:
+            skor = 0
+
+        ov = sc.get("overlay")
+        valid_ov = None
+        if isinstance(ov, dict) and ov.get("type") in ALLOWED_OVERLAY_TYPES and skor >= 4:
+            if ov.get("type") == "floating_card":
+                ov["type"] = "kinetic_typo"
+            if ov.get("trigger") or narasi:
+                if not ov.get("trigger"):
+                    words_t = re.sub(r"[^a-zA-Z0-9\s]", "", narasi.lower()).split()
+                    ov["trigger"] = " ".join(words_t[:3])
+                ov["alasan"] = str(ov.get("alasan") or "").strip()
+                valid_ov = ov
+                ovs.append(ov)
+
+        if kw:
+            kw_pool.append(kw.upper())
+        if narasi:
+            scenes.append({
+                "no": idx,
+                "narasi": narasi,
+                "visual_literal": visual_literal,
+                "keyword_cari": kw,
+                "skor_penting": skor,
+                "overlay": valid_ov,
+            })
+
+    # Fallback jika LLM masih mengembalikan format overlays datar
     if not ovs:
-        raise ValueError("Tidak ada overlay valid dalam rencana")
+        for o in p.get("overlays") or []:
+            if isinstance(o, dict) and o.get("type") in ALLOWED_OVERLAY_TYPES and o.get("trigger"):
+                if o.get("type") == "floating_card":
+                    o["type"] = "kinetic_typo"
+                ovs.append(o)
+
+    if not ovs:
+        raise ValueError("Tidak ada overlay valid pada kalimat penting")
+
+    raw_kws = [str(x).strip().upper() for x in (p.get("keywords") or []) if str(x).strip()]
+    merged_kws = list(dict.fromkeys(kw_pool + raw_kws))[:10]
+
+    cta_q = str(p.get("cta_pertanyaan") or "").strip()
+    if not cta_q and scenes and "?" in scenes[-1]["narasi"]:
+        cta_q = scenes[-1]["narasi"]
+
     return {
-        "theme": p.get("theme") if p.get("theme") in THEMES else "hutan",
+        "theme": p.get("theme") if p.get("theme") in THEMES else "bumi",
         "topic": str(p.get("topic") or "video"),
-        "hook_lines": [str(x).strip().upper() for x in (p.get("hook_lines") or []) if str(x).strip()][:3],
-        "keywords": [str(x).strip().upper() for x in (p.get("keywords") or []) if str(x).strip()][:8],
+        "hook_lines": [_clean_hook_line(x) for x in (p.get("hook_lines") or []) if _clean_hook_line(x)][:3],
+        "fakta_konkret": [str(x).strip() for x in (p.get("fakta_konkret") or []) if str(x).strip()][:5],
+        "cta_pertanyaan": cta_q,
+        "keywords": merged_kws,
+        "scenes": scenes,
         "overlays": ovs,
     }
 
 
-
 def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonnet-4-6") -> dict:
-    """Gunakan GEMINI_API_KEY (gratis) terlebih dahulu jika tersedia, lalu Claude, lalu fallback lokal."""
+    """Gunakan GEMINI_API_KEY (gratis) terlebih dahulu jika tersedia, lalu Claude."""
     import urllib.request
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if gemini_key:
@@ -570,7 +628,7 @@ def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonn
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
             body = json.dumps({
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.4},
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.35},
             }).encode("utf-8")
             req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=45) as resp:
@@ -588,19 +646,19 @@ def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonn
         )
         return _parse_json_loose(_extract_claude_text(resp))
 
-    raise RuntimeError("Tidak ada API key aktif")
+    raise RuntimeError("Tidak ada API key aktif (pasang GEMINI_API_KEY di GitHub Secrets)")
+
 
 def run_auto_director(client: anthropic.Anthropic, text: str, style_note: str, project_note: str, model: str = "claude-sonnet-4-6") -> dict:
     note_combined = style_note
     if project_note.strip():
         note_combined += f"\nCATATAN KHUSUS PROYEK INI: {project_note.strip()}"
 
-    target_ov = "15 sampai 25 item" if IS_LONG else "6 sampai 8 item"
-    fmt_label = "YouTube dokumenter layar lebar 16:9" if IS_LONG else "YouTube Shorts dokumenter Indonesia"
+    max_ov = "12-18 item" if IS_LONG else "4-6 item"
+    fmt_label = "YouTube dokumenter layar lebar 16:9" if IS_LONG else "YouTube Shorts dokumenter/berita Indonesia"
 
-    dir_prompt = f"""Kamu adalah sutradara motion graphic editorial {fmt_label}.
-Baca transkrip narasi VO berikut dan susun rencana animasi visual yang dinamis, organik, berlapis, dan sinkron dengan ritme narasi.
-DILARANG membuat kartu daftar statis atau ikon kaku.
+    dir_prompt = f"""Kamu adalah editor dokumenter & sutradara visual {fmt_label}.
+Tugasmu memecah transkrip narasi VO menjadi daftar scene PER KALIMAT yang sangat akurat secara visual dan faktual.
 
 TRANSKRIP:
 {text}
@@ -608,19 +666,45 @@ TRANSKRIP:
 CATATAN GAYA & PROYEK:
 {note_combined}
 
-ATURAN WAJIB:
-1. Pilih "theme" paling cocok dari: "api", "hutan", "bumi", "laut", "malam".
-2. Buat {target_ov} di array "overlays" (tiap overlay berjarak minimal ~7 detik dari yang lain). Setiap item HARUS punya "trigger" berupa 2-4 kata PERSIS yang muncul berurutan di transkrip (huruf kecil, tanpa tanda baca) agar terkunci ke timing Whisper.
-3. Gunakan HANYA 5 tipe animasi dinamis berikut secara bergantian (WAJIB sertakan 2-3 kali tipe "roto_typo" pada momen tokoh/subjek utama agar teks raksasa muncul di belakang tubuh subjek):
-  - "stat_counter": Angka berjalan (count-up) untuk nominal uang, jumlah rumah, tahun, atau persentase. Format: {"type":"stat_counter", "trigger":"...", "prefix":"Rp ", "value":690000000, "suffix":"", "label":"BANTUAN LANGSUNG"}
-  - "draw_on": Coretan lingkaran, garis bawah, atau panah vektor yang tergambar otomatis untuk menyorot poin kunci. Format: {"type":"draw_on", "trigger":"...", "shape":"circle", "label":"FAKTA KUNCI"}
-  - "kinetic_typo": Tipografi parallax besar tanpa kotak dengan kicker atas. Format: {{"type":"kinetic_typo", "trigger":"...", "kicker":"KONTEKS SINGKAT", "lines":["BARIS UTAMA", "*KATA KUNCI"]}} (awalan * pada baris kedua otomatis diberi efek stabilo).
-  - "marker_quote": Kutipan/fakta tajam dengan garis vertikal menyala & stabilo berjalan. Format: {{"type":"marker_quote", "trigger":"...", "badge":"FAKTA LAPANGAN", "text":"KALIMAT FAKTA SINGKAT"}}
-  - "floating_card": Kartu mengambang 3D dengan kilau cahaya untuk angka/bukti penting. Format: {{"type":"floating_card", "trigger":"...", "badge":"SOROTAN DATA", "value":"ANGKA/INTI SINGKAT", "label":"KETERANGAN SINGKAT"}}
-  - "camera_beat": Bingkai viewfinder sinematik & pulse fokus langsung di atas B-roll tanpa menutupi gambar. Format: {{"type":"camera_beat", "trigger":"...", "label":"LOKASI / MOMEN"}}
-4. Semua teks di dalam overlay HARUS singkat (maksimal 3-6 kata) dan menggunakan huruf KAPITAL.
-5. Keluarkan HANYA JSON valid tanpa markdown ```json atau penjelasan lain dengan struktur:
-{{"theme":"...","topic":"...","hook_lines":["...","*..."],"keywords":["KATA1","KATA2","KATA3","KATA4","KATA5"],"overlays":[...]}}"""
+ATURAN PERENCANAAN WAJIB:
+1. PECAH PER KALIMAT ("scenes"): Setiap kalimat/frasa utama di transkrip wajib menjadi 1 objek scene dengan field:
+   - "narasi": teks persis kalimat tersebut dari transkrip.
+   - "visual_literal": apa yang HARUS tampak nyata di layar untuk membuktikan kalimat itu (contoh: "KDM menyerahkan uang tunai kepada warga Baduy di depan rumah bilik", BUKAN kata abstrak).
+   - "keyword_cari": 2-4 kata benda/aksi konkret yang bisa difilmkan/dicari (contoh: "warga berjalan kaki", "puing rumah terbakar", "penyerahan bantuan sembako", "jembatan bambu desa"). DILARANG kata abstrak seperti KEMANUSIAAN, KEPEDULIAN, BANTUAN, KEHIDUPAN.
+   - "skor_penting": angka 1-5 (5 = angka/nominal konkret, nama tokoh/lokasi spesifik, klimaks konflik, atau pertanyaan penutup; 1-3 = kalimat transisi biasa).
+   - "overlay": null untuk kalimat skor 1-3. HANYA isi objek overlay pada kalimat skor 4-5, dengan jarak minimal 6-7 detik antar overlay (total maksimal {max_ov} untuk seluruh video). JANGAN membagi overlay bergilir rata!
+
+2. PILIHAN TIPE OVERLAY (hanya bila skor_penting >= 4, pilih sesuai isi kalimat):
+   - "roto_typo": Tokoh/subjek utama muncul di layar dan teks besar muncul di belakang tubuhnya. Format: {{"type":"roto_typo","trigger":"2-4 kata persis huruf kecil","lines":["NAMA / TOKOH","KONTEKS SINGKAT"],"alasan":"..."}}
+   - "stat_counter": Kalimat menyebut angka, nominal rupiah, jumlah rumah, tanggal, atau hitungan nyata. Format: {{"type":"stat_counter","trigger":"2-4 kata persis huruf kecil","prefix":"Rp ","value":690000000,"suffix":"","label":"BANTUAN TUNAI","alasan":"..."}}
+   - "draw_on": Menyorot fakta kunci atau bukti fisik di rekaman. Format: {{"type":"draw_on","trigger":"2-4 kata persis huruf kecil","shape":"circle","label":"FAKTA KUNCI","alasan":"..."}}
+   - "kinetic_typo": Kalimat klimaks/pernyataan tegas tanpa kotak. Format: {{"type":"kinetic_typo","trigger":"2-4 kata persis huruf kecil","kicker":"LOKASI / KONTEKS","lines":["BARIS UTAMA","KATA KUNCI"],"alasan":"..."}}
+   - "marker_quote": Fakta lapangan atau pertanyaan pemicu komentar. Format: {{"type":"marker_quote","trigger":"2-4 kata persis huruf kecil","badge":"FAKTA LAPANGAN","text":"KALIMAT SINGKAT","alasan":"..."}}
+   - "camera_beat": Momen observasi lapangan langsung. Format: {{"type":"camera_beat","trigger":"2-4 kata persis huruf kecil","label":"LOKASI","alasan":"..."}}
+
+3. FAKTA & CTA:
+   - Ekstrak minimal 3 "fakta_konkret" (siapa, berapa, kapan, di mana) dari transkrip.
+   - Pastikan ada 1 "cta_pertanyaan" pemicu komentar penonton yang relevan dengan topik.
+   - "hook_lines": 2 baris pendek huruf KAPITAL tanpa tanda bintang (*) atau simbol aneh.
+   - "theme": pilih salah satu dari "api", "hutan", "bumi", "laut", "malam".
+
+Keluarkan HANYA JSON valid tanpa markdown dengan struktur:
+{{
+  "theme": "bumi",
+  "topic": "...",
+  "hook_lines": ["BARIS HOOK 1", "BARIS HOOK 2"],
+  "fakta_konkret": ["Fakta 1", "Fakta 2", "Fakta 3"],
+  "cta_pertanyaan": "Pertanyaan pemicu komentar?",
+  "scenes": [
+    {{
+      "narasi": "...",
+      "visual_literal": "...",
+      "keyword_cari": "...",
+      "skor_penting": 5,
+      "overlay": {{"type": "stat_counter", "trigger": "...", "prefix": "Rp ", "value": 690000000, "suffix": "", "label": "DANA BANTUAN", "alasan": "Menyebut nominal bantuan secara spesifik"}}
+    }}
+  ]
+}}"""
 
     last_err = None
     for attempt in range(1, 4):
