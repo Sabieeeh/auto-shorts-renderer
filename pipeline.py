@@ -1205,6 +1205,10 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
     target_editorial = max(5, min(7, int(dur / 6)))
     editorial_moments = plan_editorial_moments(words, units, state.get("unit_texts", []), dur,
                                                transcript_text=transcript_text, target_count=target_editorial)
+    # Buang tipe overlay lama agar 4 gaya editorial (cover_story, headline_wall, chart_grow, frame_break) tampil dominan
+    _LEGACY_TYPES = {"qmark", "big", "list", "stat", "lower", "icon", "map", "chapter_title", "stat_callout", "editorial_quote", "keyword_anchor"}
+    clean_base_overlays = [o for o in state.get("overlays", []) if o.get("type") not in _LEGACY_TYPES]
+    state["overlays"] = editorial_moments + clean_base_overlays
     combined_overlays = list(overlays_raw) + editorial_moments
     print(f"[editorial] {len(editorial_moments)} momen editorial ditambahkan. Total overlay: {len(combined_overlays)}")
 
