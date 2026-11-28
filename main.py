@@ -6,9 +6,8 @@ import os
 import json
 import glob
 import html
-import importlib
 
-# Impor drive & audio helper yang TIDAK butuh config
+# Modul yang TIDAK bergantung pada VIDEO_MODE
 from audio_utils import probe, tighten_vo, align_whisper
 from drive_helper import (
     get_drive_service,
@@ -16,6 +15,7 @@ from drive_helper import (
     download_project_assets,
     upload_or_update_file,
 )
+from telegram_helper import send_message, send_message_long, send_approval_card
 
 
 def _read_inputs() -> dict:
@@ -53,12 +53,11 @@ def _ensure_anthropic_client():
     try:
         import anthropic
         return anthropic.Anthropic(api_key=api_key)
-    except:
+    except Exception:
         return None
 
 
-def _build_state(folder, folder_id, plan, scene_pairs, clip_hints, clips, words, units, vo_dur, plan_mode, theme_override):
-    import config as cfg  # Import di sini agar ambil mode terbaru
+def _build_state(folder, folder_id, plan, scene_pairs, clip_hints, clips, words, units, vo_dur, plan_mode, theme_override, cfg):
     chosen_theme = theme_override if theme_override != "auto" and theme_override in cfg.THEMES else cfg.safe_theme(plan.get("theme", ""))
 
     return {
@@ -98,11 +97,10 @@ def main():
     folder_id = folder["id"]
     print(f"[Drive] Folder ditemukan: {folder['name']} ({folder_id})")
 
-    from telegram_helper import send_message, send_message_long, send_approval_card
-
     state: dict = {}
     plan_mode: str = "SHORT"
 
+    # ── CABANG 1: PLAN / AUTO ──────────────────────────────────────────────
     if mode in ("plan", "auto"):
         send_message(chat_id, f"⏳ <b>Memproses folder:</b> <code>{html.escape(folder_name)}</code>...")
         download_project_assets(drive, folder_id, proj_dir, include_media=True)
@@ -113,25 +111,27 @@ def main():
 
         raw_text = open(trx_files[0], "rb").read().decode("utf-8-sig")
         
-        # Import config awal untuk deteksi
-        import config as cfg
-        
-        parsed_tags = __import__("smart_parser").parse_markup_tags(raw_text)
-        clean_text = __import__("smart_parser").strip_tags(raw_text)
-
         vo_padat = tighten_vo(audio_files[0], work_dir)
         vo_dur = probe(vo_padat)["dur"]
 
+        # Tentukan mode SEBELUM import config/pipeline
         force = _resolve_force_mode(project_note)
-        plan_mode = force if force else cfg.detect_mode(vo_dur)
+        if force:
+            plan_mode = force
+        else:
+            plan_mode = "LONG" if vo_dur > 75.0 else "SHORT"
+            
         print(f"[main] VO {vo_dur:.1f} dtk → mode {plan_mode}")
 
-        # ── FIX BUG: SET ENV DAN RELOAD CONFIG ──
+        # ── KUNCI PERBAIKAN: Set env DULU, baru import ──
         os.environ["VIDEO_MODE"] = plan_mode
-        importlib.reload(cfg)
 
+        import config as cfg
         import smart_parser
         from pipeline import run_auto_director, scan_local_clips, run_auto_broll
+
+        parsed_tags = smart_parser.parse_markup_tags(raw_text)
+        clean_text = smart_parser.strip_tags(raw_text)
 
         words, units, unit_texts = align_whisper(vo_padat, clean_text, vo_dur, model_name=cfg.WHISPER_MODEL)
         client = _ensure_anthropic_client()
@@ -147,7 +147,7 @@ def main():
         if os.path.exists(labels_path):
             upload_or_update_file(drive, folder_id, labels_path, "clip_labels.json", "application/json")
 
-        state = _build_state(folder, folder_id, plan, scene_pairs, clip_hints, clips, words, units, vo_dur, plan_mode, theme_override)
+        state = _build_state(folder, folder_id, plan, scene_pairs, clip_hints, clips, words, units, vo_dur, plan_mode, theme_override, cfg)
         with open(state_path, "w", encoding="utf-8") as fh:
             json.dump(state, fh, ensure_ascii=False, indent=2)
         upload_or_update_file(drive, folder_id, state_path, "plan_state.json", "application/json")
@@ -158,6 +158,7 @@ def main():
 
         send_message(chat_id, f"🚀 <b>Auto-render:</b> <code>{html.escape(folder_name)}</code> ({plan_mode})...")
 
+    # ── CABANG 2: EDIT ─────────────────────────────────────────────────────
     elif mode == "edit":
         download_project_assets(drive, folder_id, proj_dir, include_media=False)
         assert os.path.exists(state_path), "plan_state.json belum ada."
@@ -167,9 +168,6 @@ def main():
         os.environ["VIDEO_MODE"] = plan_mode
         
         import config as cfg
-        importlib.reload(cfg)
-        
-        import smart_parser
         from pipeline import apply_edit_command
 
         state = apply_edit_command(state, edit_cmd)
@@ -181,6 +179,7 @@ def main():
         send_approval_card(chat_id, state)
         return
 
+    # ── CABANG 3: RENDER ───────────────────────────────────────────────────
     elif mode == "render":
         download_project_assets(drive, folder_id, proj_dir, include_media=True)
         assert os.path.exists(state_path), "plan_state.json belum ada."
@@ -188,14 +187,13 @@ def main():
 
         plan_mode = state.get("plan_mode", "SHORT")
         
-        # ── FIX BUG: SET ENV DAN RELOAD CONFIG ──
+        # ── KUNCI PERBAIKAN: Set env DULU, baru import ──
         os.environ["VIDEO_MODE"] = plan_mode
         import config as cfg
-        importlib.reload(cfg)
 
         send_message(chat_id, f"🎬 <b>Disetujui!</b> Render <b>{plan_mode}</b> ({state.get('vo_dur',0):.1f} dtk)...")
 
-    # Fallthrough render
+    # ── FALLTHROUGH: EKSEKUSI RENDER ───────────────────────────────────────
     from pipeline import render_final_video
 
     final_mp4 = render_final_video(state, proj_dir, work_dir)
@@ -215,6 +213,7 @@ def main():
         send_message_long(chat_id, done_msg)
     else:
         send_message(chat_id, done_msg)
+
 
 if __name__ == "__main__":
     main()

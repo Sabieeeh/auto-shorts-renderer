@@ -1,10 +1,10 @@
 """
 smart_parser.py — Parser tag markup & heuristik penentuan highlight offline.
 ═══════════════════════════════════════════════════════════════════════════
-PERUBAHAN v2.1 (patch):
-  - Hook & topik cerdas: proper noun (subjek) + impactful adj/noun (konflik)
-  - Truncate di word boundary (tidak pernah potong tengah kata)
-  - Toleran terhadap kalimat panjang
+PERUBAHAN v2.2:
+  - Skip nama bulan, hari, tahun dari proper noun (NOVEMBER, KAMIS, 2026)
+  - Prioritaskan kata impactful dari konteks cerita (kebakaran, api, dst)
+  - Hindari kicker repetisi di kinetic_typo (kicker == line1 → kosong)
 ═══════════════════════════════════════════════════════════════════════════
 """
 
@@ -18,20 +18,54 @@ _TAG_RE = re.compile(r"\[\s*([A-Z_]+)\s*(?::\s*([^\]]*))?\s*\]")
 _TAG_STRIP_RE = re.compile(r"\[[^\]]*\]")
 _WS_RE = re.compile(r"\s+")
 
+_GENERIC_WORDS = {
+    "zaman", "ketika", "orang", "banyak", "sangat", "bisa", "juga",
+    "akan", "masih", "sudah", "telah", "satu", "para", "namun",
+    "tetapi", "seperti", "jika", "kalau", "maka", "kini", "saat",
+    "ini", "itu", "begitu", "demikian", "memang", "hanya",
+    "mereka", "warga", "dalam", "juga", "atau", "oleh", "adalah",
+    "malah", "justru", "tetap", "kembali", "lagi", "sekali",
+    "sebagian", "besar", "kecil", "hari", "malam", "pagi", "siang",
+    "sebelum", "sesudah", "setelah", "kemudian", "lalu", "akhirnya",
+    "sekitar", "hampir", "lebih", "kurang", "antara", "melalui",
+}
 
-# ═══════════════════════════════════════════════════════════════════════════
-# HELPER: Truncate di word boundary
-# ═══════════════════════════════════════════════════════════════════════════
+_DATE_WORDS = {
+    "januari", "februari", "maret", "april", "mei", "juni", "juli",
+    "agustus", "september", "oktober", "november", "desember",
+    "senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu",
+    "tahun", "bulan", "minggu", "hari", "tanggal",
+}
+
+_HOOK_VERBS = {
+    "menolak", "melawan", "memilih", "bertahan", "berjuang",
+    "menentang", "berhenti", "meminta", "menyerahkan", "menjaga",
+    "mengusir", "menutup", "berubah", "hilang", "kehilangan",
+    "mempertahankan", "meninggalkan", "mendapatkan", "menuntut",
+    "memutuskan", "menetapkan", "membangun", "terbakar", "melalap",
+    "memusnahkan", "menghancurkan", "memadamkan", "menyelamatkan",
+    "melanda", "menimpa", "meluluhlantakkan", "meratakan",
+}
+
+_HOOK_NOUNS = {
+    "internet", "sinyal", "ponsel", "modernisasi", "tradisi",
+    "adat", "dilema", "konflik", "krisis", "wabah", "kebakaran",
+    "banjir", "hutan", "tanah", "budaya", "perubahan",
+    "wisatawan", "turis", "pandemi", "virus", "bencana",
+    "api", "rumbia", "kampung", "bambu", "asap", "bara",
+    "dapur", "rumah", "keluarga", "warga", "petaka", "musibah",
+    "tragedi", "korban", "pengungsi", "kehilangan",
+}
+
+_HOOK_ADJ = {
+    "bebas", "terisolasi", "terpencil", "sunyi", "sepi",
+    "modern", "kuno", "ketinggalan", "maju", "dilematis",
+    "hilang", "lestari", "rusak", "terancam", "terbakar",
+    "hangus", "musnah", "porak", "poranda", "luluh", "luluhlantak",
+}
+
 
 def _truncate_words(text: str, max_chars: int) -> str:
-    """
-    Truncate teks di BATAS KATA (tidak pernah potong tengah kata).
-
-    Contoh:
-        _truncate_words("SEORANG PEMUDA BADUY MENGAKU PENGHASILANNYA MENINGKAT", 46)
-        → "SEORANG PEMUDA BADUY MENGAKU PENGHASILANNYA"
-        (bukan "SEORANG PEMUDA BADUY MENGAKU PENGHASILANNYA ME")
-    """
     words = str(text or "").split()
     if not words:
         return ""
@@ -44,7 +78,6 @@ def _truncate_words(text: str, max_chars: int) -> str:
 
 
 def _pick_anchor_phrase(text_after: str) -> str:
-    """Ambil 3–5 kata bermakna SETELAH tag sebagai anchor trigger waktu."""
     clean = _TAG_STRIP_RE.sub(" ", str(text_after or ""))
     tokens = re.findall(r"[A-Za-zÀ-ÿ0-9]+", clean)
     if not tokens:
@@ -57,14 +90,12 @@ def _pick_anchor_phrase(text_after: str) -> str:
 
 
 def strip_tags(raw_text: str) -> str:
-    """Bersihkan SEMUA tag `[...]` + karakter `*`."""
     cleaned = _TAG_STRIP_RE.sub(" ", str(raw_text or ""))
     cleaned = cleaned.replace("*", "")
     return _WS_RE.sub(" ", cleaned).strip()
 
 
 def auto_sentence_boundaries(text: str) -> List[str]:
-    """Pecah teks menjadi kalimat UTUH (tidak pernah potong di tengah kata)."""
     raw = str(text or "").strip()
     if not raw:
         return []
@@ -72,178 +103,134 @@ def auto_sentence_boundaries(text: str) -> List[str]:
     return [p.strip() for p in parts if len(p.strip()) > 4]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# HELPER: Generate hook cerdas
-# ═══════════════════════════════════════════════════════════════════════════
-
-_GENERIC_WORDS = {
-    "zaman", "ketika", "orang", "banyak", "sangat", "bisa", "juga",
-    "akan", "masih", "sudah", "telah", "satu", "para", "namun",
-    "tetapi", "seperti", "jika", "kalau", "maka", "kini", "saat",
-    "ini", "itu", "begitu", "demikian", "memang", "hanya",
-    "mereka", "warga", "dalam", "juga", "atau", "oleh", "adalah",
-    "malah", "justru", "tetap", "kembali", "lagi", "sekali",
-}
-"""Kata umum yang tidak cocok jadi hook (terlalu generik)."""
-
-_HOOK_VERBS = {
-    "menolak", "melawan", "memilih", "bertahan", "berjuang",
-    "menentang", "berhenti", "meminta", "menyerahkan", "menjaga",
-    "mengusir", "menutup", "berubah", "hilang", "kehilangan",
-    "mempertahankan", "meninggalkan", "mendapatkan", "menuntut",
-    "memutuskan", "menetapkan", "membangun",
-}
-"""Kata kerja impactful — cocok untuk hook."""
-
-_HOOK_NOUNS = {
-    "internet", "sinyal", "ponsel", "modernisasi", "tradisi",
-    "adat", "dilema", "konflik", "krisis", "wabah", "kebakaran",
-    "banjir", "hutan", "tanah", "budaya", "perubahan",
-    "wisatawan", "turis", "pandemi", "virus", "bencana",
-}
-"""Kata benda impactful — cocok untuk hook."""
-
-_HOOK_ADJ = {
-    "bebas", "terisolasi", "terpencil", "sunyi", "sepi",
-    "modern", "kuno", "ketinggalan", "maju", "dilematis",
-    "hilang", "lestari", "rusak", "terancam",
-}
-"""Kata sifat impactful — cocok untuk hook."""
+def _is_meaningful_word(w: str) -> bool:
+    lw = w.lower()
+    return (
+        lw not in cfg.TAG_ANCHOR_STOPWORDS
+        and lw not in _GENERIC_WORDS
+        and lw not in _DATE_WORDS
+    )
 
 
 def _generate_smart_hook(sents: List[str], clean_text: str) -> List[str]:
-    """
-    Generate hook 2 baris yang lebih tajam dari "N kata pertama".
+    first5 = " ".join(sents[:5]) if sents else clean_text[:400]
 
-    Strategi:
-      Line 1 = proper noun (subjek konkret) atau 2 kata unik pertama
-      Line 2 = kombinasi impactful adj + noun atau impactful verb + noun
-
-    Contoh:
-        "Di zaman ketika... ponsel, satu suku Baduy meminta bebas sinyal."
-        → ["BADUY", "BEBAS SINYAL"]
-    """
-    first3 = " ".join(sents[:3]) if sents else clean_text[:200]
-
-    # 1. Deteksi proper noun dari 3 kalimat awal (bukan awal kalimat)
-    proper = re.findall(r"(?<!^)(?<![.!?;]\s)(?<!\n)\b([A-Z][a-z]{3,})\b", first3)
+    proper = re.findall(
+        r"(?<!^)(?<![.!?;]\s)(?<!\n)\b([A-Z][a-z]{3,})\b", first5
+    )
     proper = list(dict.fromkeys(
         w.upper() for w in proper
-        if w.lower() not in cfg.TAG_ANCHOR_STOPWORDS
-        and w.lower() not in _GENERIC_WORDS
+        if _is_meaningful_word(w)
     ))
 
-    # 2. Kata unik meaningful dari 3 kalimat awal
     tokens = [
-        w.upper() for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", first3)
-        if w.lower() not in cfg.TAG_ANCHOR_STOPWORDS
-        and w.lower() not in _GENERIC_WORDS
+        w.upper() for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", first5)
+        if _is_meaningful_word(w)
     ]
     uniq = list(dict.fromkeys(tokens))
 
-    # 3. Line 1: proper noun > 2 kata awal
+    noun_choices = [w for w in uniq if w.lower() in _HOOK_NOUNS]
+    verb_choices = [w for w in uniq if w.lower() in _HOOK_VERBS]
+    adj_choices = [w for w in uniq if w.lower() in _HOOK_ADJ]
+    other_uniq = [w for w in uniq if w not in noun_choices
+                  and w not in verb_choices and w not in adj_choices]
+
     if proper:
         line1 = proper[0]
-    elif uniq:
-        line1 = " ".join(uniq[:2])
+    elif noun_choices:
+        line1 = noun_choices[0]
+    elif verb_choices:
+        line1 = verb_choices[0]
+    elif other_uniq:
+        line1 = " ".join(other_uniq[:2])
     else:
-        line1 = "DOKUMENTER BUDAYA"
+        line1 = "DOKUMENTER"
 
-    # 4. Line 2: prioritaskan impactful adj + impactful noun
     pool = [w for w in uniq if w != line1]
-    adj_choices = [w for w in pool if w.lower() in _HOOK_ADJ]
-    noun_choices = [w for w in pool if w.lower() in _HOOK_NOUNS]
-    verb_choices = [w for w in pool if w.lower() in _HOOK_VERBS]
+    pool_noun = [w for w in pool if w.lower() in _HOOK_NOUNS]
+    pool_verb = [w for w in pool if w.lower() in _HOOK_VERBS]
+    pool_adj = [w for w in pool if w.lower() in _HOOK_ADJ]
 
     line2_words: List[str] = []
-    if adj_choices and noun_choices:
-        # "BEBAS SINYAL" (adj + noun terakhir, biasanya paling kontekstual)
-        line2_words = [adj_choices[0], noun_choices[-1]]
-    elif noun_choices and len(noun_choices) >= 2:
-        line2_words = noun_choices[:2]
-    elif noun_choices:
-        line2_words = [noun_choices[0]]
-    elif verb_choices and noun_choices:
-        line2_words = [verb_choices[0], noun_choices[0]]
-    elif verb_choices:
-        line2_words = verb_choices[:2]
+    if pool_adj and pool_noun:
+        line2_words = [pool_adj[0], pool_noun[0]]
+    elif pool_noun and len(pool_noun) >= 2:
+        line2_words = pool_noun[:2]
+    elif pool_noun and pool_verb:
+        line2_words = [pool_verb[0], pool_noun[0]]
+    elif pool_verb and pool_adj:
+        line2_words = [pool_adj[0], pool_verb[0]]
+    elif pool_noun:
+        line2_words = [pool_noun[0]]
+    elif pool_verb:
+        line2_words = [pool_verb[0]]
 
-    # 5. Fallback: kalau masih kosong, ambil dari seluruh transcript
     if not line2_words:
         all_tokens = re.findall(r"[A-Za-zÀ-ÿ]{4,}", clean_text)
         for w in all_tokens:
-            lw = w.lower()
-            uw = w.upper()
-            if uw == line1:
+            lw, uw = w.lower(), w.upper()
+            if uw == line1 or not _is_meaningful_word(w):
                 continue
-            if lw in _HOOK_ADJ or lw in _HOOK_NOUNS or lw in _HOOK_VERBS:
-                if uw not in line2_words:
-                    line2_words.append(uw)
-                    if len(line2_words) >= 2:
-                        break
+            if lw in _HOOK_NOUNS or lw in _HOOK_VERBS or lw in _HOOK_ADJ:
+                line2_words.append(uw)
+                if len(line2_words) >= 2:
+                    break
 
-    # 6. Fallback terakhir: pakai sisa uniq
     if not line2_words:
-        line2_words = pool[:2] if pool else ["FAKTA LAPANGAN"]
+        line2_words = other_uniq[:2] if other_uniq else ["FAKTA LAPANGAN"]
 
     line2 = " ".join(line2_words[:2]) if line2_words else "FAKTA LAPANGAN"
     return [line1, line2]
 
 
-def _generate_smart_topic(proper: List[str], uniq: List[str],
-                          adj_choices: List[str], noun_choices: List[str]) -> str:
-    """
-    Generate topik yang utuh (tidak terpotong tengah kalimat).
+def _generate_smart_topic(sents: List[str], hook_lines: List[str]) -> str:
+    first5 = " ".join(sents[:5]) if sents else ""
 
-    Strategi:
-      - Kalau ada proper noun + impactful noun → "PROPER NOUN"
-      - Kalau ada proper noun saja → proper noun
-      - Kalau tidak ada → 5 kata unik pertama
-    """
+    tokens = [
+        w.upper() for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", first5)
+        if _is_meaningful_word(w)
+    ]
+    uniq = list(dict.fromkeys(tokens))
+
+    proper = re.findall(
+        r"(?<!^)(?<![.!?;]\s)(?<!\n)\b([A-Z][a-z]{3,})\b", first5
+    )
+    proper = list(dict.fromkeys(
+        w.upper() for w in proper if _is_meaningful_word(w)
+    ))
+    noun_choices = [w for w in uniq if w.lower() in _HOOK_NOUNS]
+
+    if proper and noun_choices:
+        return f"{noun_choices[0]} {proper[0]}"
     if proper:
-        if noun_choices:
-            return f"{proper[0]} {noun_choices[-1]}"
         return proper[0]
-    if uniq:
-        return " ".join(uniq[:5])
-    return "DOKUMENTER"
+    if noun_choices:
+        return " ".join(noun_choices[:2])
+    if hook_lines and hook_lines[0]:
+        return hook_lines[0]
+    return " ".join(uniq[:3]) if uniq else "DOKUMENTER"
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# KONVERSI TAG → OVERLAY OBJEK
-# ═══════════════════════════════════════════════════════════════════════════
-
-def build_overlay_from_tag(
-    tag_type: str,
-    args_raw: str,
-    anchor: str,
-) -> Optional[Dict[str, Any]]:
-    """Ubah 1 tag → objek overlay Remotion."""
+def build_overlay_from_tag(tag_type: str, args_raw: str, anchor: str) -> Optional[Dict[str, Any]]:
     tag_type = (tag_type or "").strip().upper()
-    if tag_type not in cfg.TAG_TO_OVERLAY_TYPE:
-        return None
-    if not anchor or not anchor.strip():
+    if tag_type not in cfg.TAG_TO_OVERLAY_TYPE or not anchor:
         return None
 
     parts = [p.strip() for p in str(args_raw or "").split("|")]
-
     def _get(i: int, default: str = "") -> str:
         return parts[i] if i < len(parts) and parts[i] else default
 
     ov_type = cfg.TAG_TO_OVERLAY_TYPE[tag_type]
     ov: Dict[str, Any] = {
-        "type": ov_type,
-        "trigger": anchor,
-        "_from_tag": True,
-        "_tag_type": tag_type,
+        "type": ov_type, "trigger": anchor,
+        "_from_tag": True, "_tag_type": tag_type,
         "alasan": f"[TAG] {tag_type}",
     }
 
     if tag_type == "ROTO":
         l1 = _truncate_words(_get(0).upper(), 18)
         l2 = _truncate_words(_get(1).upper(), 18)
-        if not l1:
-            return None
+        if not l1: return None
         ov["lines"] = [l1] + ([l2] if l2 else [])
         ov["sfx"] = "whoosh"
 
@@ -251,9 +238,8 @@ def build_overlay_from_tag(
         kicker = _truncate_words(_get(0).upper(), 20)
         l1 = _truncate_words(_get(1).upper(), 24)
         l2 = _truncate_words(_get(2).upper(), 24)
-        if not (l1 or l2):
-            return None
-        if kicker:
+        if not (l1 or l2): return None
+        if kicker and kicker != l1:
             ov["kicker"] = kicker
         ov["lines"] = [x for x in (l1, l2) if x]
         ov["sfx"] = "hit"
@@ -261,8 +247,7 @@ def build_overlay_from_tag(
     elif tag_type == "QUOTE":
         badge = _truncate_words(_get(0, "KUTIPAN").upper(), 20)
         text = _truncate_words(_get(1).upper(), 60)
-        if not text:
-            return None
+        if not text: return None
         ov["badge"] = badge
         ov["text"] = text
         ov["sfx"] = "pop"
@@ -271,8 +256,7 @@ def build_overlay_from_tag(
         raw_num = _get(0, "0")
         digits = re.sub(r"\D", "", raw_num)
         num = int(digits) if digits else 0
-        if num <= 0:
-            return None
+        if num <= 0: return None
         label = _truncate_words(_get(1, "DATA").upper(), 24)
         ov["prefix"] = "Rp " if re.search(r"\brp\.?\b", args_raw, re.I) else ""
         ov["suffix"] = "%" if "%" in args_raw else ""
@@ -284,8 +268,7 @@ def build_overlay_from_tag(
         badge = _truncate_words(_get(0, "DATA").upper(), 20)
         value = _truncate_words(_get(1).upper(), 30)
         sub = _truncate_words(_get(2).upper(), 30)
-        if not value:
-            return None
+        if not value: return None
         ov["badge"] = badge
         ov["value"] = value
         ov["label"] = sub
@@ -293,8 +276,7 @@ def build_overlay_from_tag(
 
     elif tag_type == "DRAW":
         shape = _get(0, "circle").lower()
-        if shape not in ("circle", "underline", "arrow"):
-            shape = "circle"
+        if shape not in ("circle", "underline", "arrow"): shape = "circle"
         label = _truncate_words(_get(1).upper(), 24)
         ov["shape"] = shape
         ov["label"] = label
@@ -302,8 +284,7 @@ def build_overlay_from_tag(
 
     elif tag_type == "MAP":
         loc = _truncate_words(_get(0).upper(), 26)
-        if not loc:
-            return None
+        if not loc: return None
         ov["label"] = loc
         ov["kicker"] = "LOKASI"
         ov["sfx"] = "whoosh"
@@ -311,12 +292,7 @@ def build_overlay_from_tag(
     return ov
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PARSE SEMUA TAG DI TRANSKRIP
-# ═══════════════════════════════════════════════════════════════════════════
-
 def parse_markup_tags(raw_text: str) -> Dict[str, Any]:
-    """Ekstrak semua tag markup dari transkrip mentah."""
     raw = str(raw_text or "")
     overlays: List[Dict[str, Any]] = []
     hook_lines: List[str] = []
@@ -326,8 +302,7 @@ def parse_markup_tags(raw_text: str) -> Dict[str, Any]:
 
     for m in _TAG_RE.finditer(raw):
         tag_type = (m.group(1) or "").strip().upper()
-        if tag_type not in cfg.MARKUP_TAGS:
-            continue
+        if tag_type not in cfg.MARKUP_TAGS: continue
 
         args_raw = (m.group(2) or "").strip()
         after_text = raw[m.end():m.end() + 240]
@@ -356,26 +331,16 @@ def parse_markup_tags(raw_text: str) -> Dict[str, Any]:
 
     return {
         "has_markup": len(overlays) > 0 or bool(hook_lines) or bool(cta_text),
-        "hook_lines": hook_lines,
-        "cta_text": cta_text,
-        "overlays": overlays,
-        "tags_found": sorted(tags_found_set),
+        "hook_lines": hook_lines, "cta_text": cta_text,
+        "overlays": overlays, "tags_found": sorted(tags_found_set),
         "tag_count": tag_count,
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# HEURISTIK AUTO-MODE
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _build_auto_overlay_for_sentence(
-    sent: str,
-    words_s: List[str],
-    nums: List[str],
-    is_babak: bool,
-    ov_count: int,
+    sent: str, words_s: List[str], nums: List[str],
+    is_babak: bool, ov_count: int,
 ) -> Dict[str, Any]:
-    """Bangun objek overlay otomatis untuk 1 kalimat penting."""
     trig = " ".join(
         re.sub(r"[^a-zA-Z0-9\s]", "", sent.lower()).split()[:4]
     ) or "fakta utama"
@@ -388,19 +353,15 @@ def _build_auto_overlay_for_sentence(
         b_sub = _truncate_words(raw_sub.upper(), 42)
         return {
             "type": "roto_typo" if ov_count % 2 == 0 else "marker_quote",
-            "trigger": trig,
-            "kicker": b_title,
-            "badge": b_title,
-            "text": b_sub,
-            "lines": [b_title, _truncate_words(b_sub, 22)],
+            "trigger": trig, "kicker": b_title, "badge": b_title,
+            "text": b_sub, "lines": [b_title, _truncate_words(b_sub, 22)],
             "alasan": "Penanda babak dokumenter",
         }
 
     if nums and not re.search(
         r"\b(pukul|jam|november|oktober|desember|januari|februari|maret|april"
         r"|mei|juni|juli|agustus|september|202\d|201\d)\b",
-        sent,
-        re.I,
+        sent, re.I,
     ):
         raw_digits = re.sub(r"\D", "", nums[0])
         raw_n = int(raw_digits) if raw_digits else 0
@@ -411,13 +372,9 @@ def _build_auto_overlay_for_sentence(
             prefix = "Rp " if re.search(r"\brp\.?\b", sent, re.I) else ""
             suffix = "%" if "%" in sent else ""
             return {
-                "type": "stat_counter",
-                "trigger": trig,
-                "prefix": prefix,
-                "value": raw_n,
-                "suffix": suffix,
-                "label": lbl,
-                "alasan": "Statistik atau angka konkret",
+                "type": "stat_counter", "trigger": trig,
+                "prefix": prefix, "value": raw_n, "suffix": suffix,
+                "label": lbl, "alasan": "Statistik atau angka konkret",
             }
 
     cycle = ["roto_typo", "kinetic_typo", "marker_quote", "camera_beat"]
@@ -431,15 +388,13 @@ def _build_auto_overlay_for_sentence(
 
     if chosen == "roto_typo":
         return {
-            "type": "roto_typo",
-            "trigger": trig,
+            "type": "roto_typo", "trigger": trig,
             "lines": [line1, line2],
             "alasan": "Sorotan subjek & tipografi",
         }
     if chosen == "camera_beat":
         return {
-            "type": "camera_beat",
-            "trigger": trig,
+            "type": "camera_beat", "trigger": trig,
             "label": _truncate_words(key_phrase, 26),
             "alasan": "Momen observasi lapangan",
         }
@@ -448,23 +403,20 @@ def _build_auto_overlay_for_sentence(
             " ".join(sent.split()[:7]), 46
         ).upper()
         return {
-            "type": "marker_quote",
-            "trigger": trig,
-            "badge": "FAKTA LAPANGAN",
-            "text": quote_text,
+            "type": "marker_quote", "trigger": trig,
+            "badge": "FAKTA LAPANGAN", "text": quote_text,
             "alasan": "Kutipan fakta penting",
         }
+    kicker_val = line1 if line1 != line2 else "SOROTAN"
     return {
-        "type": "kinetic_typo",
-        "trigger": trig,
-        "kicker": _truncate_words(line1, 20),
+        "type": "kinetic_typo", "trigger": trig,
+        "kicker": _truncate_words(kicker_val, 20),
         "lines": [line1, line2],
         "alasan": "Penekanan poin utama",
     }
 
 
 def extract_highlights_offline(text: str) -> Dict[str, Any]:
-    """Mode Cerdas OFFLINE — pengganti `_local_smart_plan` Mode 2 lama."""
     clean = strip_tags(text)
     sents = auto_sentence_boundaries(clean)
     if not sents:
@@ -504,9 +456,8 @@ def extract_highlights_offline(text: str) -> Dict[str, Any]:
             re.search(
                 r"\b(baduy|pikukuh|kanekes|kebakaran|mitigasi|leuit|lumbung"
                 r"|rumbia|jaro|puun|adat|larangan|bantuan|hutan|desa|warga"
-                r"|pemerintah|tanah|ekonomi|budaya)\b",
-                s,
-                re.I,
+                r"|pemerintah|tanah|ekonomi|budaya|api)\b",
+                s, re.I,
             )
         )
 
@@ -519,8 +470,7 @@ def extract_highlights_offline(text: str) -> Dict[str, Any]:
         ov = None
         in_safe_zone = safe_start < idx <= safe_end or len(sents) <= 5
         if (
-            skor >= 4
-            and in_safe_zone
+            skor >= 4 and in_safe_zone
             and (idx - last_ov_idx) >= min_sent_gap
             and ov_count < max_ov_cap
         ):
@@ -529,11 +479,8 @@ def extract_highlights_offline(text: str) -> Dict[str, Any]:
             ov_count += 1
 
         scenes.append({
-            "narasi": s,
-            "visual_literal": f"Rekaman nyata: {kw}",
-            "keyword_cari": kw,
-            "skor_penting": skor,
-            "overlay": ov,
+            "narasi": s, "visual_literal": f"Rekaman nyata: {kw}",
+            "keyword_cari": kw, "skor_penting": skor, "overlay": ov,
         })
 
     if not any(sc["overlay"] for sc in scenes) and scenes:
@@ -548,27 +495,8 @@ def extract_highlights_offline(text: str) -> Dict[str, Any]:
             sc_t["narasi"], words_t, [], False, 0
         )
 
-    # ── Hook & topik cerdas (v2.1) ─────────────────────────────────────
     hook = _generate_smart_hook(sents, clean)
-
-    # Deteksi proper noun + kata impactful untuk topik
-    first3 = " ".join(sents[:3])
-    proper_for_topic = list(dict.fromkeys(
-        w.upper() for w in re.findall(
-            r"(?<!^)(?<![.!?;]\s)(?<!\n)\b([A-Z][a-z]{3,})\b", first3
-        )
-        if w.lower() not in cfg.TAG_ANCHOR_STOPWORDS
-        and w.lower() not in _GENERIC_WORDS
-    ))
-    uniq_for_topic = list(dict.fromkeys(
-        w.upper() for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", first3)
-        if w.lower() not in cfg.TAG_ANCHOR_STOPWORDS
-        and w.lower() not in _GENERIC_WORDS
-    ))
-    noun_for_topic = [w for w in uniq_for_topic if w.lower() in _HOOK_NOUNS]
-    topic = _generate_smart_topic(
-        proper_for_topic, uniq_for_topic, [], noun_for_topic
-    )
+    topic = _generate_smart_topic(sents, hook)
 
     cta = next(
         (s for s in reversed(sents) if "?" in s),
@@ -576,25 +504,13 @@ def extract_highlights_offline(text: str) -> Dict[str, Any]:
     )
 
     return {
-        "theme": cfg.DEFAULT_THEME,
-        "topic": topic,
-        "hook_lines": hook,
-        "fakta_konkret": facts[:4] or sents[:3],
-        "cta_pertanyaan": cta,
-        "keywords": list(dict.fromkeys(kws))[:8],
-        "scenes": scenes,
+        "theme": cfg.DEFAULT_THEME, "topic": topic, "hook_lines": hook,
+        "fakta_konkret": facts[:4] or sents[:3], "cta_pertanyaan": cta,
+        "keywords": list(dict.fromkeys(kws))[:8], "scenes": scenes,
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MERGE: TAG PRIORITAS > AUTO
-# ═══════════════════════════════════════════════════════════════════════════
-
-def merge_with_tags(
-    auto_plan: Dict[str, Any],
-    parsed_tags: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Gabungkan plan otomatis dengan hasil tag (tag prioritas)."""
+def merge_with_tags(auto_plan: Dict[str, Any], parsed_tags: Dict[str, Any]) -> Dict[str, Any]:
     if not parsed_tags.get("has_markup"):
         result = dict(auto_plan)
         result.setdefault("overlays", _overlays_from_scenes(auto_plan))
@@ -603,10 +519,8 @@ def merge_with_tags(
         return result
 
     merged = dict(auto_plan)
-
     if parsed_tags.get("hook_lines"):
         merged["hook_lines"] = list(parsed_tags["hook_lines"])
-
     if parsed_tags.get("cta_text"):
         merged["cta_pertanyaan"] = parsed_tags["cta_text"]
 
@@ -614,8 +528,7 @@ def merge_with_tags(
     tag_ovs: List[Dict[str, Any]] = []
     for ov in parsed_tags.get("overlays", []):
         trig = (ov.get("trigger") or "").strip().lower()
-        if not trig or trig in seen_triggers:
-            continue
+        if not trig or trig in seen_triggers: continue
         seen_triggers.add(trig)
         ov_copy = dict(ov)
         ov_copy["_fixed"] = True
@@ -634,7 +547,6 @@ def merge_with_tags(
 
 
 def _overlays_from_scenes(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Ambil semua overlay non-null dari plan['scenes']."""
     if plan.get("overlays"):
         return list(plan["overlays"])
     ovs: List[Dict[str, Any]] = []
@@ -643,14 +555,3 @@ def _overlays_from_scenes(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(ov, dict) and ov.get("type"):
             ovs.append(ov)
     return ovs
-
-
-__all__ = [
-    "parse_markup_tags",
-    "strip_tags",
-    "build_overlay_from_tag",
-    "auto_sentence_boundaries",
-    "extract_highlights_offline",
-    "merge_with_tags",
-    "_truncate_words",
-]
