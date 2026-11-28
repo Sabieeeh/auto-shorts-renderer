@@ -620,12 +620,26 @@ def _sanitize_plan(p: dict) -> dict:
 
 
 def _local_smart_plan(prompt: str) -> dict:
-    # Mode 1: Pencocokan Kalimat -> Klip dari daftar JSON di prompt
+    # Mode 1: Pencocokan Kalimat -> Klip
     if "DAFTAR KLIP TERSEDIA DI GOOGLE DRIVE:" in prompt:
         m_kal = re.search(r"DAFTAR KALIMAT & VISUAL YANG DIBUTUHKAN:\n(\[.*?\])\n\nDAFTAR KLIP", prompt, re.S)
         m_klip = re.search(r"DAFTAR KLIP TERSEDIA DI GOOGLE DRIVE:\n(\[.*?\])\n\nATURAN", prompt, re.S)
         kals = json.loads(m_kal.group(1)) if m_kal else []
         klips = json.loads(m_klip.group(1)) if m_klip else []
+
+        # Kunci urutan 01..60 secara kronologis jika mayoritas file berawalan nomor urut
+        seq_count = sum(1 for c in klips if re.match(r"^\d{2,3}_", c.get("nama_file", "")))
+        if klips and seq_count >= max(3, int(len(klips) * 0.7)):
+            klips_sorted = sorted(klips, key=lambda x: x.get("nama_file", ""))
+            pilihan = []
+            n_k, n_c = max(len(kals), 1), len(klips_sorted)
+            for idx, k in enumerate(kals):
+                c_idx = min(int(idx * n_c / n_k), n_c - 1)
+                c = klips_sorted[c_idx]
+                trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", k.get("kalimat", "").lower()).split()[:4])
+                pilihan.append({"no": k.get("no", idx + 1), "kalimat": k.get("kalimat", ""), "frasa_trigger": trig, "id_klip": c["id"], "alasan": f"Urutan kronologis #{c_idx+1:02d}"})
+            return {"pilihan": pilihan}
+
         stop = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu", "ada", "atau", "juga"}
         pilihan, used_recent = [], []
         for k in kals:
@@ -648,37 +662,44 @@ def _local_smart_plan(prompt: str) -> dict:
     sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", trx) if len(s.strip()) > 6]
     if not sents:
         sents = [trx]
-    stop = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu", "ada", "warga", "dalam", "saat"}
+
+    stop = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu", "ada", "warga", "dalam", "saat", "juga", "atau", "oleh", "akan", "bisa", "tidak", "lebih", "sangat", "seperti", "karena", "namun", "tetapi", "sehingga", "antara", "secara", "berdasarkan", "hasil", "tahun", "berselang"}
     scenes, facts, kws = [], [], []
-    last_ov_idx = -3
+    last_ov_idx = -4
+    max_ov_cap = 12 if len(sents) > 25 else 5
+
     for idx, s in enumerate(sents, 1):
-        words_s = [w for w in re.findall(r"[a-zA-Z0-9]{4,}", s) if w.lower() not in stop]
+        words_s = [w for w in re.findall(r"[a-zA-Z]{4,}", s) if w.lower() not in stop]
         kw = " ".join(words_s[:3]).lower() or "dokumentasi lapangan"
         kws.append(kw.upper())
-        nums = re.findall(r"(?:Rp\s*)?\d[\d.,]*", s)
-        has_cap = bool(re.findall(r"\b[A-Z]{2,}|\b[A-Z][a-z]+\s+[A-Z][a-z]+", s))
-        skor = 5 if (nums or "?" in s or idx in (1, len(sents))) else (4 if has_cap else 2)
-        if nums or has_cap:
+        nums = re.findall(r"\b\d{1,3}(?:[.,]\d{3})*\b", s)
+        is_babak = bool(re.match(r"^babak\s+\d+", s.strip(), re.I))
+        skor = 5 if (is_babak or nums or "?" in s) else 2
+        if nums or is_babak:
             facts.append(s[:110])
+
         ov = None
-        if skor >= 4 and (idx - last_ov_idx) >= 2 and len([x for x in scenes if x["overlay"]]) < 6:
-            trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", s.lower()).split()[:3])
-            if nums:
+        if skor >= 4 and (idx - last_ov_idx) >= 3 and len([x for x in scenes if x["overlay"]]) < max_ov_cap:
+            trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", s.lower()).split()[:4])
+            if is_babak:
+                parts_b = [p.strip() for p in s.split(".", 1)]
+                b_title = parts_b[0].upper()
+                b_sub = (parts_b[1] if len(parts_b) > 1 and parts_b[1] else "SOROTAN UTAMA").upper()[:36]
+                ov = {"type": "marker_quote", "trigger": trig, "badge": b_title, "text": b_sub, "alasan": "Penanda babak dokumenter"}
+                last_ov_idx = idx
+            elif nums and "pukul" not in s.lower() and "november" not in s.lower() and "2026" not in s:
                 raw_n = int(re.sub(r"\D", "", nums[0]) or "0")
-                pref = "Rp " if "rp" in s.lower() else ""
-                ov = {"type": "stat_counter", "trigger": trig, "prefix": pref, "value": raw_n, "suffix": "", "label": (words_s[0] if words_s else "DATA").upper(), "alasan": "Angka konkret"}
-            elif idx == 1 or has_cap:
-                lines_rt = [w.upper() for w in words_s[:2]] or ["SOROTAN", "UTAMA"]
-                ov = {"type": "roto_typo", "trigger": trig, "lines": lines_rt, "alasan": "Tokoh / momen kunci"}
-            else:
-                ov = {"type": "marker_quote", "trigger": trig, "badge": "FAKTA LAPANGAN", "text": " ".join(s.split()[:6]).upper(), "alasan": "Poin utama"}
-            last_ov_idx = idx
+                if 1 <= raw_n <= 999:
+                    lbl = " ".join(words_s[:2]).upper() or "DATA FAKTA"
+                    ov = {"type": "stat_counter", "trigger": trig, "prefix": "", "value": raw_n, "suffix": "", "label": lbl, "alasan": "Statistik lapangan"}
+                    last_ov_idx = idx
+
         scenes.append({"narasi": s, "visual_literal": f"Rekaman nyata: {kw}", "keyword_cari": kw, "skor_penting": skor, "overlay": ov})
 
-    first_w = [w.upper() for w in re.findall(r"[a-zA-Z0-9]{3,}", sents[0])[:4]]
-    hook = [" ".join(first_w[:2]) or "FAKTA LAPANGAN", " ".join(first_w[2:4]) or "SELENGKAPNYA"]
+    first_w = [w.upper() for w in words_s[:4]] if not sents else [w.upper() for w in re.findall(r"[a-zA-Z]{4,}", sents[0]) if w.lower() not in stop][:4]
+    hook = [" ".join(first_w[:2]) or "TRAGEDI BADUY", " ".join(first_w[2:4]) or "FAKTA LAPANGAN"]
     cta = next((s for s in reversed(sents) if "?" in s), "Bagaimana pendapat Anda tentang kejadian ini?")
-    return {"theme": "bumi", "topic": " ".join(first_w[:3]) or "DOKUMENTER", "hook_lines": hook, "fakta_konkret": facts[:4] or sents[:3], "cta_pertanyaan": cta, "keywords": list(dict.fromkeys(kws))[:8], "scenes": scenes}
+    return {"theme": "bumi", "topic": " ".join(first_w[:3]) or "DOKUMENTER BADUY", "hook_lines": hook, "fakta_konkret": facts[:4] or sents[:3], "cta_pertanyaan": cta, "keywords": list(dict.fromkeys(kws))[:8], "scenes": scenes}
 
 
 def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonnet-4-6") -> dict:
