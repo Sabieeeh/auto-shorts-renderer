@@ -32,7 +32,15 @@ FINAL_MAXRATE = "10M" if IS_LONG else "9M"
 OVERLAY_MAX = 25 if IS_LONG else 8
 OVERLAY_MIN_GAP = 6.0 if IS_LONG else 5.0
 SKIP_PREFIXES = ("output_", "short_", "long_")
-ALLOWED_OVERLAY_TYPES = {"roto_typo", "kinetic_typo", "marker_quote", "floating_card", "camera_beat", "stat_counter", "draw_on"}
+ALLOWED_OVERLAY_TYPES = {
+    "roto_typo",
+    "kinetic_typo",
+    "marker_quote",
+    "floating_card",
+    "camera_beat",
+    "stat_counter",
+    "draw_on",
+}
 TARGET_LUFS = -16.0
 
 THEMES = {
@@ -45,9 +53,9 @@ THEMES = {
 
 DEFAULT_STYLE_NOTE = (
     "Format video panjang landscape 16:9 dokumenter budaya yang dinamis dan hidup."
-    "Susun 15-25 overlay berjarak rapi menggunakan kombinasi kinetic_typo, marker_quote, floating_card, dan camera_beat."
+    "Susun 15-25 overlay berjarak rapi menggunakan kombinasi roto_typo, kinetic_typo, marker_quote, stat_counter, dan camera_beat."
     if IS_LONG else
-    "Gunakan variasi dinamis kinetic_typo, marker_quote, floating_card, dan camera_beat agar layar selalu hidup dan organik."
+    "Gunakan variasi dinamis roto_typo, kinetic_typo, marker_quote, stat_counter, dan camera_beat agar layar selalu hidup dan organik."
 )
 
 _WHISPER_CACHE = {}
@@ -128,16 +136,33 @@ def still_to_clip(src: str, out_p: str, dur: float = STILL_DUR) -> bool:
 def prepare_still_clips(clips: list, work_dir: str) -> list:
     still_dir = os.path.join(work_dir, "stills")
     os.makedirs(still_dir, exist_ok=True)
+    to_convert = []
     for c in clips:
         if not c.get("is_img"):
             continue
         out_p = os.path.join(still_dir, f"{c['key']}.mp4")
         cached = os.path.exists(out_p) and os.path.getsize(out_p) > 1000
-        if cached or still_to_clip(c["path"], out_p):
+        if cached:
             c.update(path=out_p, dur=STILL_DUR, is_img=False, vertical=(not IS_LONG), still=True)
-            print("Gambar -> klip:", c["name"])
         else:
-            c["dur"] = STILL_DUR
+            to_convert.append((c, out_p))
+
+    if to_convert:
+        workers = max(1, min(4, os.cpu_count() or 2))
+        print(f"Mengonversi {len(to_convert)} gambar menjadi klip ({workers} paralel)...")
+
+        def _conv_item(item):
+            c_obj, out_path = item
+            ok = still_to_clip(c_obj["path"], out_path)
+            return c_obj, out_path, ok
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for c_obj, out_path, ok in ex.map(_conv_item, to_convert):
+                if ok:
+                    c_obj.update(path=out_path, dur=STILL_DUR, is_img=False, vertical=(not IS_LONG), still=True)
+                    print("Gambar -> klip:", c_obj["name"])
+                else:
+                    c_obj["dur"] = STILL_DUR
     return clips
 
 
@@ -153,27 +178,20 @@ def motion_filter(fr: int, drift: float, kin, kout) -> str:
     terms = []
     if drift:
         terms.append(f"{drift}*on/{max(fr - 1, 1)}")
-    xs, blurs = [], []
+    xs = []
     if kout:
         pr = f"max(0,(on-({fr}-{n}))/{n})"
         terms.append(f"{0.22 if kout == 'zoom' else 0.26}*pow({pr},2)")
         if kout == "whip":
             xs.append(f"+0.075*iw*pow({pr},2)")
-            pass  # hard-cut bersih tanpa efek buram
-        else:
-            pass  # hard-cut bersih tanpa efek buram
     if kin:
         pr = f"max(0,({n}-on)/{n})"
         terms.append(f"{0.22 if kin == 'zoom' else 0.26}*pow({pr},2)")
         if kin == "whip":
             xs.append(f"-0.075*iw*pow({pr},2)")
-            pass  # hard-cut bersih tanpa efek buram
-        else:
-            pass  # hard-cut bersih tanpa efek buram
     z = "1+" + "+".join(terms) if terms else "1"
     x = "iw/2-(iw/zoom/2)" + "".join(xs)
-    zp = f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}"
-    return ",".join([zp] + blurs)
+    return f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}"
 
 
 def measure(path: str):
@@ -187,6 +205,13 @@ def measure(path: str):
 # ----------------------------------------------------------------------------
 # Teks & timing
 # ----------------------------------------------------------------------------
+def _clean_script_text(raw: str) -> str:
+    """Bersihkan penanda produksi seperti [JEDA 2 DETIK] dan bintang markdown liar."""
+    cleaned = re.sub(r"\[[^\]]*\]", " ", str(raw or ""))
+    cleaned = cleaned.replace("*", "")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def syl(w: str) -> int:
     return max(len(re.findall(r"[aiueo]", w.lower())), 1) if re.search(r"\w", w) else 0
 
@@ -253,6 +278,7 @@ def tighten_vo(src: str, work_dir: str, tight_db: int = -33, max_pause: float = 
 
 
 def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"):
+    clean_text = _clean_script_text(text)
     r_sil = sh(["ffmpeg", "-hide_banner", "-i", vo_path, "-af", "silencedetect=noise=-33dB:d=0.10", "-f", "null", "-"])
     ss = [float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", r_sil.stderr)]
     se = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r_sil.stderr)]
@@ -260,7 +286,7 @@ def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"
     sp0 = sil[0][1] if sil and sil[0][0] <= 0.05 else 0.0
     sp1 = sil[-1][0] if sil and sil[-1][1] >= dur - 0.05 else dur
 
-    unit_texts = [u for u in re.split(r"(?<=[.,!?;:…])\s+", text) if u.strip()]
+    unit_texts = [u for u in re.split(r"(?<=[.,!?;:…])\s+", clean_text) if u.strip()]
     words, units = [], []
     for ui, u in enumerate(unit_texts):
         a = len(words)
@@ -269,7 +295,6 @@ def align_whisper(vo_path: str, text: str, dur: float, model_name: str = "small"
         units.append([a, len(words)])
     assert words, "Teks narasi kosong."
 
-    # Perkiraan awal berbasis suku kata (cadangan bila Whisper tidak cocok)
     t_cur = sp0
     tot_s = sum(w["syl"] for w in words) or 1
     for w in words:
@@ -350,7 +375,6 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
                 cur = []
         if cur:
             groups.append(cur)
-        # Gabungkan grup berisi 1 kata ke tetangganya (versi lama membuangnya sehingga kata hilang dari caption)
         merged = []
         for g in groups:
             if len(g) == 1 and merged:
@@ -408,12 +432,11 @@ def build_captions(words: list, units: list, keywords: list, dur: float) -> list
 # Overlay
 # ----------------------------------------------------------------------------
 def _normalize_overlay_type(o: dict) -> dict:
-    """Konversi defensif tipe lama (big/lower/stat/list/icon/qmark/map) ke 4 tipe animasi baru."""
+    """Konversi defensif tipe lama ke tipe animasi modern yang didukung Remotion."""
     t = str(o.get("type") or "").strip().lower()
     if t in ALLOWED_OVERLAY_TYPES:
         return o
 
-    # Konversi list lama menjadi floating_card ringkas
     if t == "list":
         items = o.get("items") or []
         first_txt = str(items[0].get("text") if items and isinstance(items[0], dict) else "").strip()
@@ -424,9 +447,10 @@ def _normalize_overlay_type(o: dict) -> dict:
         return o
 
     if t == "stat":
-        o["type"] = "floating_card"
-        o["badge"] = ""
-        if o.get("type") == "floating_card": o["type"] = "kinetic_typo"
+        lbl = str(o.get("label") or o.get("text") or "DATA UTAMA").strip().upper()
+        o["type"] = "kinetic_typo"
+        o.setdefault("kicker", "FAKTA")
+        o.setdefault("lines", [lbl[:24]])
         return o
 
     if t in ("icon", "map"):
@@ -439,18 +463,21 @@ def _normalize_overlay_type(o: dict) -> dict:
         o["type"] = "marker_quote"
         return o
 
-    # big, qmark, solid -> kinetic_typo
     if t == "qmark" and o.get("label"):
-        o["lines"] = [f"*{str(o['label']).upper()}?"]
+        o["lines"] = [f"{str(o['label']).upper()}?"]
     o["type"] = "kinetic_typo"
+    o.setdefault("lines", [str(o.get("text") or o.get("label") or "SOROTAN").upper()[:24]])
     return o
 
 
 def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, dur: float) -> list:
     default_dur = {
+        "roto_typo": 3.0 if IS_LONG else 2.5,
+        "stat_counter": 3.0 if IS_LONG else 2.5,
         "kinetic_typo": 2.8 if IS_LONG else 2.3,
         "marker_quote": 3.2 if IS_LONG else 2.6,
         "floating_card": 3.4 if IS_LONG else 2.8,
+        "draw_on": 2.8 if IS_LONG else 2.3,
         "camera_beat": 2.4 if IS_LONG else 2.0,
     }
     ovs = []
@@ -461,7 +488,7 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
     for o in extra + overlays:
         o = _normalize_overlay_type(json.loads(json.dumps(o)))
         if "at" in o:
-            o["t0"] = o["at"] if o["at"] >= 0 else max(dur + o["at"], 0)
+            o["t0"] = float(o["at"]) if float(o["at"]) >= 0 else max(dur + float(o["at"]), 0.0)
         else:
             i = find_trigger(words, o.get("trigger", ""))
             if i is None:
@@ -471,7 +498,15 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
             continue
         ovs.append(o)
 
-    prio = {"floating_card": 0, "marker_quote": 1, "kinetic_typo": 2, "camera_beat": 3}
+    prio = {
+        "roto_typo": 0,
+        "stat_counter": 1,
+        "floating_card": 2,
+        "marker_quote": 3,
+        "kinetic_typo": 4,
+        "draw_on": 5,
+        "camera_beat": 6,
+    }
 
     def _span(o):
         return o["t0"], o["t0"] + o.get("dur", default_dur.get(o["type"], 2.6))
@@ -481,7 +516,7 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
         return a0 < b1 + OVERLAY_MIN_GAP and b0 < a1 + OVERLAY_MIN_GAP
 
     kept = [o for o in ovs if o.get("_fixed")]
-    for o in sorted((o for o in ovs if not o.get("_fixed")), key=lambda o: (prio.get(o["type"], 2), o["t0"])):
+    for o in sorted((o for o in ovs if not o.get("_fixed")), key=lambda o: (prio.get(o["type"], 4), o["t0"])):
         if len(kept) >= OVERLAY_MAX:
             print(f"[overlay] dilewati (melebihi batas {OVERLAY_MAX}): {o['type']} @ {o['t0']:.1f}s")
             continue
@@ -496,38 +531,14 @@ def lock_overlays(words: list, overlays: list, hook_lines: list, cta_text: str, 
         o.pop("_fixed", None)
         nxt = ovs[k + 1]["t0"] - 0.1 if k + 1 < len(ovs) else dur
         o["t1"] = max(min(o["t0"] + o.get("dur", default_dur.get(o["type"], 2.6)), nxt, dur), o["t0"] + 0.3)
-    return ovs
-
-    def _span(o):
-        return o["t0"], o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8))
-
-    def _clash(a, b):
-        (a0, a1), (b0, b1) = _span(a), _span(b)
-        return a0 < b1 + OVERLAY_MIN_GAP and b0 < a1 + OVERLAY_MIN_GAP
-
-    kept = [o for o in ovs if o.get("_fixed")]
-    for o in sorted((o for o in ovs if not o.get("_fixed")), key=lambda o: (prio.get(o["type"], 2), o["t0"])):
-        if len(kept) >= OVERLAY_MAX:
-            print(f"[overlay] dilewati (melebihi batas {OVERLAY_MAX}): {o['type']} @ {o['t0']:.1f}s")
-            continue
-        if any(_clash(o, k) for k in kept):
-            print(f"[overlay] dilewati (terlalu rapat, jeda < {OVERLAY_MIN_GAP:.0f}s): {o['type']} @ {o['t0']:.1f}s")
-            continue
-        kept.append(o)
-    ovs = kept
-
-    ovs.sort(key=lambda o: o["t0"])
-    for k, o in enumerate(ovs):
-        o.pop("_fixed", None)
-        nxt = ovs[k + 1]["t0"] - 0.1 if k + 1 < len(ovs) else dur
-        o["t1"] = max(min(o["t0"] + o.get("dur", default_dur.get(o["type"], 2.8)), nxt, dur), o["t0"] + 0.3)
         for it in o.get("items", []):
-            it["_t"] = max(0.0, it["abs"] - o["t0"])
+            if "abs" in it:
+                it["_t"] = max(0.0, it["abs"] - o["t0"])
     return ovs
 
 
 # ----------------------------------------------------------------------------
-# Auto Director (Claude)
+# Auto Director (Smart Local Planner + Sanitizer)
 # ----------------------------------------------------------------------------
 def _extract_claude_text(resp) -> str:
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
@@ -567,7 +578,7 @@ def _sanitize_plan(p: dict) -> dict:
         ov = sc.get("overlay")
         valid_ov = None
         if isinstance(ov, dict) and ov.get("type") in ALLOWED_OVERLAY_TYPES and skor >= 4:
-            if ov.get("type") == "floating_card":
+            if ov.get("type") == "floating_card" and not ov.get("value"):
                 ov["type"] = "kinetic_typo"
             if ov.get("trigger") or narasi:
                 if not ov.get("trigger"):
@@ -589,13 +600,26 @@ def _sanitize_plan(p: dict) -> dict:
                 "overlay": valid_ov,
             })
 
-    # Fallback jika LLM masih mengembalikan format overlays datar
     if not ovs:
         for o in p.get("overlays") or []:
             if isinstance(o, dict) and o.get("type") in ALLOWED_OVERLAY_TYPES and o.get("trigger"):
-                if o.get("type") == "floating_card":
-                    o["type"] = "kinetic_typo"
                 ovs.append(o)
+
+    if not ovs and scenes:
+        # Jaminan penyelamatan terakhir jika seluruh skor < 4
+        mid_idx = min(len(scenes) - 1, max(0, len(scenes) // 3))
+        sc_fb = scenes[mid_idx]
+        sc_fb["skor_penting"] = 5
+        trig_fb = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", sc_fb["narasi"].lower()).split()[:4])
+        ov_fb = {
+            "type": "kinetic_typo",
+            "trigger": trig_fb or "fakta utama",
+            "kicker": "SOROTAN",
+            "lines": [" ".join(sc_fb["narasi"].split()[:3]).upper() or "FAKTA UTAMA"],
+            "alasan": "Sorotan utama otomatis",
+        }
+        sc_fb["overlay"] = ov_fb
+        ovs.append(ov_fb)
 
     if not ovs:
         print(f"[DEBUG] scenes={len(raw_scenes)} ovs={len(ovs)} sample={[(x.get('skor_penting'), (x.get('overlay') or {}).get('type')) for x in raw_scenes[:8] if isinstance(x, dict)]}")
@@ -620,6 +644,89 @@ def _sanitize_plan(p: dict) -> dict:
     }
 
 
+def _extract_transcript_from_prompt(prompt: str) -> str:
+    """Ambil blok TRANSKRIP utuh meskipun mengandung banyak paragraf (\\n\\n)."""
+    m_exact = re.search(r"TRANSKRIP:\s*\n(.*?)\n\s*CATATAN GAYA & PROYEK:", prompt, re.S)
+    if m_exact and len(m_exact.group(1).strip()) > 5:
+        return m_exact.group(1).strip()
+    m_open = re.search(r"TRANSKRIP[^\n]*:\s*\n(.*)$", prompt, re.S)
+    if m_open and len(m_open.group(1).strip()) > 5:
+        return m_open.group(1).strip()
+    return prompt.strip()
+
+
+def _build_overlay_for_sentence(sent: str, words_s: list, nums: list, is_babak: bool, ov_count: int) -> dict:
+    """Bangun objek overlay yang valid & variatif untuk kalimat penting."""
+    trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", sent.lower()).split()[:4]) or "fakta utama"
+    key_phrase = " ".join(w.upper() for w in words_s[:3]) or "FAKTA LAPANGAN"
+
+    if is_babak:
+        parts_b = [p.strip() for p in re.split(r"[:.\-–]", sent, maxsplit=1)]
+        b_title = parts_b[0].upper()[:28]
+        b_sub = (parts_b[1] if len(parts_b) > 1 and parts_b[1] else key_phrase).upper()[:42]
+        return {
+            "type": "roto_typo" if ov_count % 2 == 0 else "marker_quote",
+            "trigger": trig,
+            "kicker": b_title,
+            "badge": b_title,
+            "text": b_sub,
+            "lines": [b_title, b_sub[:22]],
+            "alasan": "Penanda babak dokumenter",
+        }
+
+    if nums and not re.search(r"\b(pukul|jam|november|oktober|desember|januari|202\d)\b", sent, re.I):
+        raw_digits = re.sub(r"\D", "", nums[0])
+        raw_n = int(raw_digits) if raw_digits else 0
+        if 1 <= raw_n <= 999999999:
+            lbl = " ".join(w.upper() for w in words_s[:2]) or "DATA FAKTA"
+            prefix = "Rp " if re.search(r"\brp\.?\b", sent, re.I) else ""
+            suffix = "%" if "%" in sent else ""
+            return {
+                "type": "stat_counter",
+                "trigger": trig,
+                "prefix": prefix,
+                "value": raw_n,
+                "suffix": suffix,
+                "label": lbl[:24],
+                "alasan": "Statistik atau angka konkret",
+            }
+
+    cycle_types = ["roto_typo", "kinetic_typo", "marker_quote", "camera_beat"]
+    chosen = cycle_types[ov_count % len(cycle_types)]
+    line1 = " ".join(w.upper() for w in words_s[:2]) or "SOROTAN"
+    line2 = " ".join(w.upper() for w in words_s[2:4]) or key_phrase
+
+    if chosen == "roto_typo":
+        return {
+            "type": "roto_typo",
+            "trigger": trig,
+            "lines": [line1[:18], line2[:18]],
+            "alasan": "Sorotan subjek & tipografi latar belakang",
+        }
+    if chosen == "camera_beat":
+        return {
+            "type": "camera_beat",
+            "trigger": trig,
+            "label": key_phrase[:26],
+            "alasan": "Momen observasi lapangan",
+        }
+    if chosen == "marker_quote":
+        return {
+            "type": "marker_quote",
+            "trigger": trig,
+            "badge": "FAKTA LAPANGAN",
+            "text": " ".join(sent.split()[:7]).upper()[:46],
+            "alasan": "Kutipan fakta penting",
+        }
+    return {
+        "type": "kinetic_typo",
+        "trigger": trig,
+        "kicker": line1[:20],
+        "lines": [line1[:18], line2[:18]],
+        "alasan": "Penekanan poin utama",
+    }
+
+
 def _local_smart_plan(prompt: str) -> dict:
     # Mode 1: Pencocokan Kalimat -> Klip
     if "DAFTAR KLIP TERSEDIA DI GOOGLE DRIVE:" in prompt:
@@ -637,7 +744,13 @@ def _local_smart_plan(prompt: str) -> dict:
                 c_idx = min(int(idx * n_c / n_k), n_c - 1)
                 c = klips_sorted[c_idx]
                 trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", k.get("kalimat", "").lower()).split()[:4])
-                pilihan.append({"no": k.get("no", idx + 1), "kalimat": k.get("kalimat", ""), "frasa_trigger": trig, "id_klip": c["id"], "alasan": f"Urutan kronologis #{c_idx+1:02d}"})
+                pilihan.append({
+                    "no": k.get("no", idx + 1),
+                    "kalimat": k.get("kalimat", ""),
+                    "frasa_trigger": trig,
+                    "id_klip": c["id"],
+                    "alasan": f"Urutan kronologis #{c_idx + 1:02d}",
+                })
             return {"pilihan": pilihan}
 
         stop = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu", "ada", "atau", "juga"}
@@ -653,71 +766,91 @@ def _local_smart_plan(prompt: str) -> dict:
             if best_c:
                 used_recent.append(best_c["id"])
                 trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", k.get("kalimat", "").lower()).split()[:4])
-                pilihan.append({"no": k.get("no", 1), "kalimat": k.get("kalimat", ""), "frasa_trigger": trig, "id_klip": best_c["id"], "alasan": f"Kecocokan kata kunci ({max(best_sc,1)} poin)"})
+                pilihan.append({
+                    "no": k.get("no", 1),
+                    "kalimat": k.get("kalimat", ""),
+                    "frasa_trigger": trig,
+                    "id_klip": best_c["id"],
+                    "alasan": f"Kecocokan kata kunci ({max(best_sc, 1)} poin)",
+                })
         return {"pilihan": pilihan}
 
-    # Mode 2: Sutradara Per Kalimat dari TRANSKRIP (tangkap semua variasi header prompt)
-    trx = ""
-    for pat in [
-        r"TRANSKRIP:\n(.*?)\n\n[A-Z_ ]+:",
-        r"TRANSKRIP[^\n]*:\n(.*?)\n\n",
-        r"TRANSKRIP[^\n]*:\n(.*)$",
-    ]:
-        m_trx = re.search(pat, prompt, re.S)
-        if m_trx and len(m_trx.group(1).strip()) > 10:
-            trx = m_trx.group(1).strip()
-            break
-    if not trx:
-        trx = prompt.strip().splitlines()[-1]
+    # Mode 2: Sutradara Per Kalimat dari TRANSKRIP utuh
+    raw_trx = _extract_transcript_from_prompt(prompt)
+    trx = _clean_script_text(raw_trx)
 
-    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", trx) if len(s.strip()) > 6]
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", trx) if len(s.strip()) > 4]
     if not sents:
-        sents = [trx]
+        sents = [trx or "Dokumentasi lapangan"]
 
-    stop = {"yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu", "ada", "warga", "dalam", "saat", "juga", "atau", "oleh", "akan", "bisa", "tidak", "lebih", "sangat", "seperti", "karena", "namun", "tetapi", "sehingga", "antara", "secara", "berdasarkan", "hasil", "tahun", "berselang"}
+    stop = {
+        "yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "ini", "itu",
+        "ada", "warga", "dalam", "saat", "juga", "atau", "oleh", "akan", "bisa",
+        "tidak", "lebih", "sangat", "seperti", "karena", "namun", "tetapi", "sehingga",
+        "antara", "secara", "berdasarkan", "hasil", "tahun", "berselang", "mereka",
+        "kita", "kami", "adalah", "sebagai", "agar", "para", "sudah", "telah",
+    }
+
+    total_words = sum(len(s.split()) for s in sents) or 1
+    est_dur = total_words / 2.6
+    max_ov_cap = min(OVERLAY_MAX - 2, max(4, int(est_dur / 32.0))) if IS_LONG else min(OVERLAY_MAX - 2, 5)
+    min_sent_gap = max(3, len(sents) // max(max_ov_cap, 1))
+
+    # Hindari ~4 kalimat pertama & ~3 kalimat terakhir agar tidak bentrok dengan hook (0.15s) & CTA (akhir)
+    safe_start = min(3, max(1, len(sents) // 12))
+    safe_end = max(safe_start + 1, len(sents) - min(3, max(1, len(sents) // 12)))
+
     scenes, facts, kws = [], [], []
-    last_ov_idx = -4
-    max_ov_cap = 12 if len(sents) > 25 else 5
+    last_ov_idx = -min_sent_gap
+    ov_count = 0
 
     for idx, s in enumerate(sents, 1):
-        words_s = [w for w in re.findall(r"[a-zA-Z]{4,}", s) if w.lower() not in stop]
+        words_s = [w for w in re.findall(r"[a-zA-ZÀ-ÿ]{4,}", s) if w.lower() not in stop]
         kw = " ".join(words_s[:3]).lower() or "dokumentasi lapangan"
         kws.append(kw.upper())
         nums = re.findall(r"\b\d{1,3}(?:[.,]\d{3})*\b", s)
-        is_babak = bool(re.match(r"^babak\s+\d+", s.strip(), re.I))
-        skor = 5 if (is_babak or nums or "?" in s or idx in (1, len(sents))) else 2
+        is_babak = bool(re.match(r"^(?:babak|bagian)\s+(?:\d+|[ivx]+)\b", s.strip(), re.I))
+        has_entity = bool(re.search(r"\b(baduy|pikukuh|kanekes|kebakaran|mitigasi|leuit|lumbung|rumbia|jaro|puun|adat|larangan|bantuan)\b", s, re.I))
+
+        skor = 5 if (is_babak or nums or "?" in s) else (4 if (has_entity and len(words_s) >= 3) else 2)
         if nums or is_babak:
             facts.append(s[:110])
 
         ov = None
-        if skor >= 4 and (idx - last_ov_idx) >= 3 and len([x for x in scenes if x["overlay"]]) < max_ov_cap:
-            trig = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", s.lower()).split()[:4])
-            if is_babak:
-                parts_b = [p.strip() for p in s.split(".", 1)]
-                b_title = parts_b[0].upper()
-                b_sub = (parts_b[1] if len(parts_b) > 1 and parts_b[1] else "SOROTAN UTAMA").upper()[:36]
-                ov = {"type": "marker_quote", "trigger": trig, "badge": b_title, "text": b_sub, "alasan": "Penanda babak dokumenter"}
-                last_ov_idx = idx
-            elif nums and "pukul" not in s.lower() and "november" not in s.lower() and "2026" not in s:
-                raw_n = int(re.sub(r"\D", "", nums[0]) or "0")
-                if 1 <= raw_n <= 999:
-                    lbl = " ".join(words_s[:2]).upper() or "DATA FAKTA"
-                    ov = {"type": "stat_counter", "trigger": trig, "prefix": "", "value": raw_n, "suffix": "", "label": lbl, "alasan": "Statistik lapangan"}
-                    last_ov_idx = idx
+        in_safe_zone = safe_start < idx <= safe_end or len(sents) <= 5
+        if skor >= 4 and in_safe_zone and (idx - last_ov_idx) >= min_sent_gap and ov_count < max_ov_cap:
+            ov = _build_overlay_for_sentence(s, words_s, nums, is_babak, ov_count)
+            last_ov_idx = idx
+            ov_count += 1
 
-        scenes.append({"narasi": s, "visual_literal": f"Rekaman nyata: {kw}", "keyword_cari": kw, "skor_penting": skor, "overlay": ov})
+        scenes.append({
+            "narasi": s,
+            "visual_literal": f"Rekaman nyata: {kw}",
+            "keyword_cari": kw,
+            "skor_penting": skor,
+            "overlay": ov,
+        })
 
-    # Jaminan minimal 1 overlay valid agar run_auto_director tidak pernah menolak rencana
+    # Jaminan pasti ada overlay valid di zona aman jika filter di atas belum menghasilkan apa pun
     if not any(sc["overlay"] for sc in scenes) and scenes:
-        sc0 = scenes[0]
-        sc0["skor_penting"] = 5
-        trig0 = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", sc0["narasi"].lower()).split()[:4])
-        sc0["overlay"] = {"type": "marker_quote", "trigger": trig0, "badge": "FAKTA UTAMA", "text": " ".join(sc0["narasi"].split()[:6]).upper(), "alasan": "Sorotan pembuka"}
+        target_i = min(len(scenes) - 1, max(0, len(scenes) // 3))
+        sc_t = scenes[target_i]
+        words_t = [w for w in re.findall(r"[a-zA-ZÀ-ÿ]{4,}", sc_t["narasi"]) if w.lower() not in stop]
+        sc_t["skor_penting"] = 5
+        sc_t["overlay"] = _build_overlay_for_sentence(sc_t["narasi"], words_t, [], False, 0)
 
-    first_w = [w.upper() for w in re.findall(r"[a-zA-Z]{4,}", sents[0]) if w.lower() not in stop][:4]
-    hook = [" ".join(first_w[:2]) or "TRAGEDI BADUY", " ".join(first_w[2:4]) or "FAKTA LAPANGAN"]
-    cta = next((s for s in reversed(sents) if "?" in s), "Bagaimana pendapat Anda tentang kejadian ini?")
-    return {"theme": "bumi", "topic": " ".join(first_w[:3]) or "DOKUMENTER BADUY", "hook_lines": hook, "fakta_konkret": facts[:4] or sents[:3], "cta_pertanyaan": cta, "keywords": list(dict.fromkeys(kws))[:8], "scenes": scenes}
+    first_w = [w.upper() for w in re.findall(r"[a-zA-ZÀ-ÿ]{4,}", sents[0]) if w.lower() not in stop][:4]
+    hook = [" ".join(first_w[:2]) or "DOKUMENTER BUDAYA", " ".join(first_w[2:4]) or "FAKTA LAPANGAN"]
+    cta = next((s for s in reversed(sents) if "?" in s), "Bagaimana pendapat Anda tentang hal ini?")
+    return {
+        "theme": "bumi",
+        "topic": " ".join(first_w[:3]) or "DOKUMENTER BADUY",
+        "hook_lines": hook,
+        "fakta_konkret": facts[:4] or sents[:3],
+        "cta_pertanyaan": cta,
+        "keywords": list(dict.fromkeys(kws))[:8],
+        "scenes": scenes,
+    }
 
 
 def _call_llm_json(prompt: str, anthropic_client=None, model: str = "claude-sonnet-4-6") -> dict:
@@ -744,43 +877,12 @@ CATATAN GAYA & PROYEK:
 
 ATURAN PERENCANAAN WAJIB:
 1. PECAH PER KALIMAT ("scenes"): Setiap kalimat/frasa utama di transkrip wajib menjadi 1 objek scene dengan field:
-   - "narasi": teks persis kalimat tersebut dari transkrip.
-   - "visual_literal": apa yang HARUS tampak nyata di layar untuk membuktikan kalimat itu (contoh: "KDM menyerahkan uang tunai kepada warga Baduy di depan rumah bilik", BUKAN kata abstrak).
-   - "keyword_cari": 2-4 kata benda/aksi konkret yang bisa difilmkan/dicari (contoh: "warga berjalan kaki", "puing rumah terbakar", "penyerahan bantuan sembako", "jembatan bambu desa"). DILARANG kata abstrak seperti KEMANUSIAAN, KEPEDULIAN, BANTUAN, KEHIDUPAN.
-   - "skor_penting": angka 1-5 (5 = angka/nominal konkret, nama tokoh/lokasi spesifik, klimaks konflik, atau pertanyaan penutup; 1-3 = kalimat transisi biasa).
-   - "overlay": null untuk kalimat skor 1-3. HANYA isi objek overlay pada kalimat skor 4-5, dengan jarak minimal 6-7 detik antar overlay (total maksimal {max_ov} untuk seluruh video). JANGAN membagi overlay bergilir rata!
-
-2. PILIHAN TIPE OVERLAY (hanya bila skor_penting >= 4, pilih sesuai isi kalimat):
-   - "roto_typo": Tokoh/subjek utama muncul di layar dan teks besar muncul di belakang tubuhnya. Format: {{"type":"roto_typo","trigger":"2-4 kata persis huruf kecil","lines":["NAMA / TOKOH","KONTEKS SINGKAT"],"alasan":"..."}}
-   - "stat_counter": Kalimat menyebut angka, nominal rupiah, jumlah rumah, tanggal, atau hitungan nyata. Format: {{"type":"stat_counter","trigger":"2-4 kata persis huruf kecil","prefix":"Rp ","value":690000000,"suffix":"","label":"BANTUAN TUNAI","alasan":"..."}}
-   - "draw_on": Menyorot fakta kunci atau bukti fisik di rekaman. Format: {{"type":"draw_on","trigger":"2-4 kata persis huruf kecil","shape":"circle","label":"FAKTA KUNCI","alasan":"..."}}
-   - "kinetic_typo": Kalimat klimaks/pernyataan tegas tanpa kotak. Format: {{"type":"kinetic_typo","trigger":"2-4 kata persis huruf kecil","kicker":"LOKASI / KONTEKS","lines":["BARIS UTAMA","KATA KUNCI"],"alasan":"..."}}
-   - "marker_quote": Fakta lapangan atau pertanyaan pemicu komentar. Format: {{"type":"marker_quote","trigger":"2-4 kata persis huruf kecil","badge":"FAKTA LAPANGAN","text":"KALIMAT SINGKAT","alasan":"..."}}
-   - "camera_beat": Momen observasi lapangan langsung. Format: {{"type":"camera_beat","trigger":"2-4 kata persis huruf kecil","label":"LOKASI","alasan":"..."}}
-
-3. FAKTA & CTA:
-   - Ekstrak minimal 3 "fakta_konkret" (siapa, berapa, kapan, di mana) dari transkrip.
-   - Pastikan ada 1 "cta_pertanyaan" pemicu komentar penonton yang relevan dengan topik.
-   - "hook_lines": 2 baris pendek huruf KAPITAL tanpa tanda bintang (*) atau simbol aneh.
-   - "theme": pilih salah satu dari "api", "hutan", "bumi", "laut", "malam".
-
-Keluarkan HANYA JSON valid tanpa markdown dengan struktur:
-{{
-  "theme": "bumi",
-  "topic": "...",
-  "hook_lines": ["BARIS HOOK 1", "BARIS HOOK 2"],
-  "fakta_konkret": ["Fakta 1", "Fakta 2", "Fakta 3"],
-  "cta_pertanyaan": "Pertanyaan pemicu komentar?",
-  "scenes": [
-    {{
-      "narasi": "...",
-      "visual_literal": "...",
-      "keyword_cari": "...",
-      "skor_penting": 5,
-      "overlay": {{"type": "stat_counter", "trigger": "...", "prefix": "Rp ", "value": 690000000, "suffix": "", "label": "DANA BANTUAN", "alasan": "Menyebut nominal bantuan secara spesifik"}}
-    }}
-  ]
-}}"""
+  - "narasi": teks persis kalimat tersebut dari transkrip.
+  - "visual_literal": apa yang HARUS tampak nyata di layar untuk membuktikan kalimat itu.
+  - "keyword_cari": 2-4 kata benda/aksi konkret yang bisa difilmkan/dicari.
+  - "skor_penting": angka 1-5 (5 = angka/nominal konkret, nama tokoh/lokasi spesifik, klimaks konflik, atau pertanyaan penutup; 1-3 = kalimat transisi biasa).
+  - "overlay": null untuk kalimat skor 1-3. HANYA isi objek overlay pada kalimat skor 4-5, dengan jarak minimal 6-7 detik antar overlay (total maksimal {max_ov} untuk seluruh video).
+"""
 
     last_err = None
     for attempt in range(1, 4):
@@ -858,7 +960,6 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
                 dirty = True
                 print("Label Gemini baru:", c["name"], "->", out.get("deskripsi", "")[:60])
             else:
-                # Fallback deskripsi dari nama file jika tanpa API key
                 clean_nm = re.sub(r"^\d+_", "", os.path.splitext(c["name"])[0]).replace("_", " ")
                 cache[c["name"]] = {"size": sz, "deskripsi": clean_nm, "tag": clean_nm.split(), "ada_orang": True, "wajah_jelas": False}
                 dirty = True
@@ -883,7 +984,6 @@ def run_auto_broll(client: anthropic.Anthropic, clips: list, unit_texts: list, w
         for k, c in ids.items()
     ]
 
-    # Gunakan daftar scenes dari Auto Director jika tersedia, agar pencocokan berbasis visual_literal
     if scenes:
         kal_list = [
             {
@@ -907,13 +1007,8 @@ DAFTAR KLIP TERSEDIA DI GOOGLE DRIVE:
 {json.dumps(klip_list, ensure_ascii=False, indent=2)}
 
 ATURAN PENCOCOKAN WAJIB:
-1. Pasangkan SETIAP nomor kalimat ("no") dengan 1 "id_klip" (K01, K02, dst) yang visualnya PALING COCOK dengan aksi/benda/tokoh di kalimat tersebut.
-2. JANGAN memutar klip secara urut/bergilir buta! Jika kalimat bicara soal penyerahan bantuan/uang, pilih klip penyerahan bantuan. Jika bicara soal puing kebakaran, pilih klip puing kebakaran.
-3. Hindari memakai klip yang persis sama dua kali berturut-turut kecuali memang tidak ada klip lain yang relevan.
-4. Sertakan "frasa_trigger" (2-4 kata persis huruf kecil dari kalimat tersebut) dan "alasan" singkat kenapa klip itu dipilih.
-
-Keluarkan HANYA JSON valid:
-{{"pilihan": [{{"no": 1, "kalimat": "...", "frasa_trigger": "...", "id_klip": "K01", "alasan": "..."}}]}}"""
+1. Pasangkan SETIAP nomor kalimat ("no") dengan 1 "id_klip" (K01, K02, dst).
+"""
 
     hints = {}
     scene_pairs = []
@@ -936,9 +1031,8 @@ Keluarkan HANYA JSON valid:
                 "alasan": str(p.get("alasan") or "").strip(),
             })
     except Exception as e:
-        print(f"(!) Pencocokan B-roll Gemini gagal: {str(e)[:180]}")
+        print(f"(!) Pencocokan B-roll gagal: {str(e)[:180]}")
 
-    # Simpan pasangan kalimat -> klip ke file bantu agar bisa dibaca Telegram preview
     try:
         with open(os.path.join(proj_dir, "scene_pairs.json"), "w", encoding="utf-8") as fh:
             json.dump(scene_pairs, fh, ensure_ascii=False, indent=2)
@@ -994,7 +1088,7 @@ def apply_edit_command(state: dict, raw_cmd: str) -> dict:
             if not k or not v:
                 print(f"(!) /klip: '{chunk}' dilewati, bagian kiri atau kanan '=' kosong.")
                 continue
-            matched_name = next((nm for nm in usable if v.lower() in nm.lower()), None)
+            matched_name = next((nm for nm in usable if nm.lower() == v.lower()), None) or next((nm for nm in usable if v.lower() in nm.lower()), None)
             if not matched_name:
                 print(f"(!) /klip: nama klip '{v}' tidak cocok dengan klip yang tersedia ({len(usable)} klip).")
                 continue
@@ -1089,7 +1183,9 @@ def render_final_video(state: dict, proj_dir: str, work_dir: str, remo_dir: str 
         order = clips[rr % len(clips):] + clips[:rr % len(clips)]
         for t, nm in hint_t:
             if t_start <= t <= t_end:
-                order = [c for c in clips if nm.lower() in c["name"].lower()] + order
+                exact = [c for c in clips if c["name"].lower() == nm.lower()]
+                partial = [c for c in clips if nm.lower() in c["name"].lower() and c not in exact]
+                order = (exact or partial) + order
         for relax in (0.0, 0.5, 0.8, 1.0):
             for c in order:
                 if c["dur"] < d_seg + 0.4:
