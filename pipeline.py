@@ -598,6 +598,7 @@ def _sanitize_plan(p: dict) -> dict:
                 ovs.append(o)
 
     if not ovs:
+        print(f"[DEBUG] scenes={len(raw_scenes)} ovs={len(ovs)} sample={[(x.get('skor_penting'), (x.get('overlay') or {}).get('type')) for x in raw_scenes[:8] if isinstance(x, dict)]}")
         raise ValueError("Tidak ada overlay valid pada kalimat penting")
 
     raw_kws = [str(x).strip().upper() for x in (p.get("keywords") or []) if str(x).strip()]
