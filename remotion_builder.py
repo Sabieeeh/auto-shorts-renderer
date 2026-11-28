@@ -1,16 +1,18 @@
 """
 remotion_builder.py — Generator project Remotion untuk overlay AE-grade.
 ═══════════════════════════════════════════════════════════════════════════
-FUNGSI PUBLIK:
-  - prepare_remotion_project(remo_dir, is_long=False) → None
-
-PERUBAHAN v2:
-  - F_BODY (undefined) → F_DISPLAY di StatCounter & FloatingCard.
-  - REG.floating_card sekarang memakai FloatingCard.
-  - PathCallout diintegrasikan ke CameraBeat.
-  - applyGlobalRig prop (RIG_OFF=1 mematikan drift).
-  - download_geo_assets() dihapus (dead code).
-  - is_long parameter eksplisit (bukan module-level env).
+PERUBAHAN v2.1 (Batch A fix):
+  - RotoTypo fallback ke KineticTypo jika rotoSrc tidak ada ATAU _rotoDisabled
+    → CEGAH layar hitam saat rembg gagal
+  - Garis aksen KineticTypo pakai transform:scaleX (bukan width berubah)
+    → CEGAH bergerigi
+  - HighlightedSentence skip BrushMark jika kata kunci panjang (>10 char)
+    atau posisi > 70% (dekat tepi wrap) → CEGAH blok kuning terpotong
+  - MotionStage exit lebih halus (14 frame bukan 8)
+  - CameraBeat exit fade eksplisit 8 frame sebelum dur habis
+  - KineticTypo dengan _is_cta: posisi naik + font lebih kecil (hindari subtitle)
+  - Overlay root: filter captions yang overlap dengan heavy overlays
+    → CEGAH judul besar + subtitle tampil bersamaan
 ═══════════════════════════════════════════════════════════════════════════
 """
 
@@ -29,7 +31,6 @@ registerRoot(Root);
 
 
 def _build_root_tsx(out_w: int, out_h: int) -> str:
-    """Bangun src/Root.tsx dengan dimensi sesuai mode."""
     return f"""import React from "react";
 import {{Composition}} from "remotion";
 import {{Overlay}} from "./Overlay";
@@ -135,12 +136,13 @@ const wrapLines = (rawLines: string[], maxChars = 18): string[] => {
   return out.slice(0, 3);
 };
 
+// FIX v2.1: exit lebih halus (14 frame bukan 8) supaya tidak "hilang mendadak"
 const MotionStage: React.FC<any> = ({dur, children, driftDir = -1}) => {
   const f = useCurrentFrame();
-  const outP = interpolate(f, [dur - 8, dur], [0, 1], {...clamp, easing: Easing.in(Easing.cubic)});
+  const outP = interpolate(f, [dur - 14, dur], [0, 1], {...clamp, easing: Easing.in(Easing.cubic)});
   const opacity = 1 - outP;
-  const scale = 1 - outP * 0.05;
-  const ty = outP * 26 * driftDir;
+  const scale = 1 - outP * 0.06;
+  const ty = outP * 22 * driftDir;
   return (
     <AbsoluteFill style={{
       opacity,
@@ -185,10 +187,16 @@ const BrushMark: React.FC<any> = ({delay = 0, color, children}) => {
   );
 };
 
+// FIX v2.1: skip BrushMark kalau kata kunci terlalu panjang atau dekat tepi
 const HighlightedSentence: React.FC<any> = ({text, delay = 6, color, ink}) => {
   const key = keyWord(text);
   const idx = key ? text.lastIndexOf(key) : -1;
-  if (idx < 0 || text.trim().split(/\s+/).length < 2) return <>{text}</>;
+  const posRatio = idx >= 0 ? idx / Math.max(text.length, 1) : 1;
+  const tooLong = key.length > 10;
+  const nearEdge = posRatio > 0.7 || posRatio < 0.05;
+  if (idx < 0 || text.trim().split(/\s+/).length < 2 || tooLong || nearEdge) {
+    return <>{text}</>;
+  }
   return (
     <>
       {text.slice(0, idx)}
@@ -242,6 +250,7 @@ const PathCallout: React.FC<{d?: string; color?: string; startFrame?: number}> =
   );
 };
 
+// ── ROTO_TYPO (dengan fallback) ──────────────────────────────────────────
 const RotoTypo: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -296,6 +305,7 @@ const RotoTypo: React.FC<any> = ({o, dur}) => {
   );
 };
 
+// ── KINETIC_TYPO (dengan fix garis aksen + CTA) ──────────────────────────
 const KineticTypo: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -308,14 +318,18 @@ const KineticTypo: React.FC<any> = ({o, dur}) => {
   const kicker = up(o.kicker || o.badge || "");
   const starIdx = lines.findIndex((l) => l.startsWith("*"));
   const accentIdx = starIdx >= 0 ? starIdx : (lines.length > 1 ? lines.length - 1 : -1);
+  const isCTA = !!o._is_cta;
 
   const driftX = interpolate(f, [0, dur], [-14, 14], clamp);
   const lineGrow = Math.min(1, Math.max(0, spring({frame: f - 2, fps, config: SPR_SNAP})));
   const bgDim = interpolate(f, [0, 8], [0, 1], clamp);
 
-  const boxH = isLand ? 520 : 680;
-  const boxTop = Math.round(zoneMid(isLand) - boxH / 2);
-  const maxW = isLand ? 1520 : 880;
+  // FIX v2.1: CTA lebih kecil + naik supaya tidak tabrak subtitle
+  const boxH = isLand ? 520 : (isCTA ? 460 : 680);
+  const boxTop = Math.round(
+    (isCTA ? (zoneMid(isLand) - 140) : zoneMid(isLand)) - boxH / 2
+  );
+  const maxW = isLand ? 1520 : (isCTA ? 720 : 880);
 
   return (
     <MotionStage dur={dur}>
@@ -345,8 +359,8 @@ const KineticTypo: React.FC<any> = ({o, dur}) => {
           const l = raw.replace(/^\*/, "");
           const accent = i === accentIdx;
           const size = accent
-            ? Math.min(isLand ? 96 : 108, Math.max(46, maxW / (Math.max(l.length, 4) * 0.58)))
-            : Math.min(isLand ? 102 : 114, Math.max(46, maxW / (Math.max(l.length, 4) * 0.76)));
+            ? Math.min(isLand ? 96 : (isCTA ? 88 : 108), Math.max(46, maxW / (Math.max(l.length, 4) * 0.58)))
+            : Math.min(isLand ? 102 : (isCTA ? 96 : 114), Math.max(46, maxW / (Math.max(l.length, 4) * 0.76)));
           const paraDir = i % 2 === 0 ? 1 : -1;
           return (
             <WipeReveal key={i} delay={3 + i * 4} angle={paraDir * 2.5} style={{textAlign: "center", maxWidth: width - 120}}>
@@ -374,11 +388,15 @@ const KineticTypo: React.FC<any> = ({o, dur}) => {
           );
         })}
 
+        {/* FIX v2.1: garis aksen pakai scaleX (bukan width) supaya tidak bergerigi */}
         <div style={{
           marginTop: 24, height: 5, borderRadius: 3,
-          width: (isLand ? 680 : 480) * lineGrow,
-          background: `linear-gradient(90deg, transparent, ${C.orange}, ${C.cream}, transparent)`,
+          width: isLand ? 680 : 480,
+          transform: `scaleX(${lineGrow})`,
+          transformOrigin: "center center",
+          background: `linear-gradient(90deg, transparent 0%, ${C.orange} 30%, ${C.cream} 50%, ${C.orange} 70%, transparent 100%)`,
           boxShadow: `0 0 18px ${C.orange}`,
+          willChange: "transform",
         }} />
       </div>
     </MotionStage>
@@ -664,6 +682,7 @@ const FloatingCard: React.FC<any> = ({o, dur}) => {
   );
 };
 
+// FIX v2.1: CameraBeat exit fade eksplisit
 const CameraBeat: React.FC<any> = ({o, dur}) => {
   const C = useC();
   const f = useCurrentFrame();
@@ -674,6 +693,7 @@ const CameraBeat: React.FC<any> = ({o, dur}) => {
   const snap = Math.min(1, Math.max(0, spring({frame: f, fps, config: SPR_SNAP})));
   const pulse = 1 + Math.sin(f * 0.25) * 0.015;
   const label = up(o.label || o.text || o.kicker || "");
+  const exitFade = interpolate(f, [dur - 10, dur - 2], [1, 0], clamp);
 
   const padX = isLand ? 120 : 64;
   const topY = Z.top + 20;
@@ -685,7 +705,7 @@ const CameraBeat: React.FC<any> = ({o, dur}) => {
       <div style={{
         position: "absolute", left: padX, right: padX, top: topY, height: boxH,
         transform: `scale(${(1.12 - snap * 0.12) * pulse})`,
-        opacity: snap * 0.92,
+        opacity: snap * 0.92 * exitFade,
       }}>
         <div style={{position: "absolute", left: 0, top: 0, width: corner, height: corner, borderTop: `5px solid ${C.orange}`, borderLeft: `5px solid ${C.orange}`}} />
         <div style={{position: "absolute", right: 0, top: 0, width: corner, height: corner, borderTop: `5px solid ${C.orange}`, borderRight: `5px solid ${C.orange}`}} />
@@ -766,8 +786,16 @@ const Caps: React.FC<any> = ({cue, dur, fps}) => {
   );
 };
 
+// FIX v2.1: RotoTypo fallback wrapper (kalau alpha rusak, pakai KineticTypo)
+const RotoTypoWrapper: React.FC<any> = ({o, dur}) => {
+  if (!o.rotoSrc || o._rotoDisabled) {
+    return <KineticTypo o={{...o, type: "kinetic_typo"}} dur={dur} />;
+  }
+  return <RotoTypo o={o} dur={dur} />;
+};
+
 const REG: any = {
-  roto_typo: RotoTypo,
+  roto_typo: RotoTypoWrapper,
   draw_on: DrawOn,
   stat_counter: StatCounter,
   kinetic_typo: KineticTypo,
@@ -785,6 +813,9 @@ const REG: any = {
   map: CameraBeat,
 };
 
+// FIX v2.1: filter captions yang overlap dengan heavy overlays
+const HEAVY_TYPES = ["kinetic_typo", "marker_quote", "roto_typo", "floating_card"];
+
 export const Overlay: React.FC<any> = ({
   overlays = [],
   fps = 30,
@@ -797,6 +828,16 @@ export const Overlay: React.FC<any> = ({
   const C = useMemo(() => ({...DEFAULT_C, ...(theme && theme.hex ? theme.hex : {})}), [theme]);
   const vars: any = theme && theme.vars ? theme.vars : {};
   const cfg = useMemo(() => ({glass: glassSrc}), [glassSrc]);
+
+  const heavyRanges = overlays
+    .filter((o: any) => HEAVY_TYPES.includes(o.type))
+    .map((o: any) => [o.t0, o.t1] as [number, number]);
+
+  const visibleCaptions = captions.filter((c: any) => {
+    return !heavyRanges.some(
+      ([t0, t1]) => c.s < t1 - 0.3 && c.e > t0 + 0.3
+    );
+  });
 
   const overlayLayer = (
     <CameraMotionBlur samples={6} shutterAngle={150}>
@@ -822,7 +863,7 @@ export const Overlay: React.FC<any> = ({
           ) : (
             overlayLayer
           )}
-          {captions.map((c: any, i: number) => {
+          {visibleCaptions.map((c: any, i: number) => {
             const from = Math.round(c.s * fps);
             const dur = Math.max(4, Math.round((c.e - c.s) * fps));
             return (
@@ -843,7 +884,6 @@ def prepare_remotion_project(
     remo_dir: str = "/tmp/remotion_overlay",
     is_long: bool = False,
 ) -> None:
-    """Tulis seluruh file project Remotion ke `remo_dir`."""
     out_w = 1920 if is_long else 1080
     out_h = 1080 if is_long else 1920
 

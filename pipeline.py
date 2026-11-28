@@ -1,30 +1,14 @@
 """
-pipeline.py — Orchestrator render pipeline auto-shorts-renderer v2.
+pipeline.py — Orchestrator render pipeline auto-shorts-renderer v2.1.
 
 ═══════════════════════════════════════════════════════════════════════════
-FUNGSI PUBLIK (dipakai main.py):
-  - run_auto_director(client, text, style_note, project_note, ...)
-  - scan_local_clips(proj_dir, work_dir, extract_frames)
-  - run_auto_broll(client, clips, unit_texts, words, proj_dir, ...)
-  - apply_edit_command(state, raw_cmd)
-  - render_final_video(state, proj_dir, work_dir, remo_dir)
-
-RE-EXPORT dari audio_utils (kompatibilitas impor lama):
-  - sh, _concat_quote, probe, tighten_vo, measure, align_whisper
-
-RE-EXPORT dari config (kompatibilitas impor lama):
-  - DEFAULT_STYLE_NOTE, THEMES, ALLOWED_OVERLAY_TYPES
-
-KONTRAK IMPOR:
-  Modul ini WAJIB di-import SETELAH `os.environ["VIDEO_MODE"]` di-set
-  oleh caller (main.py). Kalau tidak, `IS_LONG`, `W`, `H`, dan semua
-  konstanta dependen akan salah.
-
-═══════════════════════════════════════════════════════════════════════════
-API OPSIONAL:
-  Secara default, planner berjalan 100% OFFLINE (tanpa API).
-  Untuk mengaktifkan API, set env `USE_API=1` dan sediakan Anthropic client.
-  Kalau API gagal, otomatis fallback ke offline — pipeline TIDAK AKAN GAGAL.
+PERUBAHAN v2.1 (Batch A fix):
+  - lock_overlays: durasi hook naik (2.8 SHORT / 3.2 LONG), CTA naik
+    (3.0) + posisi lebih tinggi (at = dur - 3.2) + flag _is_cta
+  - lock_overlays: overlay non-fixed dengan durasi < 1.2 dtk DROP (bukan blip)
+  - lock_overlays: overlay fixed (hook/CTA/tag) paksa min 1.5 dtk
+  - render_final_video: set _rotoDisabled jika extract_roto_layer gagal
+    → RotoTypo fallback ke KineticTypo (tidak ada layar hitam)
 ═══════════════════════════════════════════════════════════════════════════
 """
 
@@ -44,7 +28,6 @@ from PIL import Image, ImageDraw, ImageFilter
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
 
-# ── Import dari modul v2 ──────────────────────────────────────────────────
 import config as cfg
 import smart_parser
 from audio_utils import (
@@ -57,10 +40,7 @@ from audio_utils import (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 1. RE-EXPORT & ALIAS (kompatibilitas impor lama)
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ── Re-export (kompatibilitas impor lama) ─────────────────────────────────
 IS_LONG = cfg.IS_LONG
 W, H = cfg.W, cfg.H
 FPS = cfg.FPS
@@ -87,22 +67,15 @@ RENDER_CONCURRENCY = cfg.RENDER_CONCURRENCY
 REMOTION_DIR = cfg.REMOTION_DIR
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 2. UTILITAS TEKS
-# ═══════════════════════════════════════════════════════════════════════════
-
 def norm(w: str) -> str:
-    """Normalisasi kata untuk pencocokan: alfanumerik + lowercase."""
     return re.sub(r"[^\w]", "", w.lower())
 
 
 def similar(a: str, b: str) -> bool:
-    """Cek kemiripan kata (identik atau rasio ≥ 0.82)."""
     return a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.82
 
 
 def find_trigger(words: List[dict], trig: str, after: int = 0) -> Optional[int]:
-    """Cari index kata pertama dalam `words` yang cocok dengan frasa `trig`."""
     if not trig:
         return None
     tk = [norm(x) for x in str(trig).split() if norm(x)]
@@ -119,7 +92,6 @@ def find_trigger(words: List[dict], trig: str, after: int = 0) -> Optional[int]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def still_to_clip(src: str, out_p: str, dur: float = STILL_DUR) -> bool:
-    """Ubah gambar diam menjadi klip mp4 sesuai orientasi, dengan zoom Ken Burns."""
     try:
         info = probe(src)
         iw, ih = int(info.get("w") or 0), int(info.get("h") or 0)
@@ -156,7 +128,6 @@ def still_to_clip(src: str, out_p: str, dur: float = STILL_DUR) -> bool:
 
 
 def prepare_still_clips(clips: List[dict], work_dir: str) -> List[dict]:
-    """Konversi semua klip gambar ke mp4 (cache di work_dir/stills)."""
     still_dir = os.path.join(work_dir, "stills")
     os.makedirs(still_dir, exist_ok=True)
     to_convert = []
@@ -191,19 +162,13 @@ def prepare_still_clips(clips: List[dict], work_dir: str) -> List[dict]:
     return clips
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 4. MOTION / CUT
-# ═══════════════════════════════════════════════════════════════════════════
-
 def cut_kind(i: int) -> Optional[str]:
-    """Hard-cut bersih pada 80% potongan; transisi halus tiap 5 shot sekali."""
     if i <= 0 or i % 5 != 0:
         return None
     return "zoom"
 
 
 def motion_filter(fr: int, drift: float, kin, kout) -> str:
-    """Bangun ekspresi FFmpeg zoompan untuk drift + kin/kout."""
     n = CUT_FRAMES
     terms: List[str] = []
     if drift:
@@ -224,13 +189,8 @@ def motion_filter(fr: int, drift: float, kin, kout) -> str:
     return f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={FPS}"
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 5. BUILD CAPTIONS
-# ═══════════════════════════════════════════════════════════════════════════
-
 def build_captions(words: List[dict], units: List[List[int]],
                    keywords: List[str], dur: float) -> List[dict]:
-    """Bangun cue subtitle word-level dari words/units/keywords."""
     kw_tok = [[norm(x) for x in k.split()] for k in keywords]
     kw_single = {w for kw in kw_tok for w in kw if len(w) >= 6}
 
@@ -322,12 +282,7 @@ def build_captions(words: List[dict], units: List[List[int]],
     return [{"s": c["s"], "e": c["e"], "lines": c["cap"]} for c in cues]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 6. NORMALIZE OVERLAY
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _normalize_overlay_type(o: dict) -> dict:
-    """Konversi defensif tipe lama ke tipe modern yang didukung Remotion."""
     t = str(o.get("type") or "").strip().lower()
     if t in ALLOWED_OVERLAY_TYPES:
         return o
@@ -370,7 +325,7 @@ def _normalize_overlay_type(o: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. LOCK OVERLAYS
+# 7. LOCK OVERLAYS — v2.1 (patch Batch A)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def lock_overlays(words: List[dict], overlays: List[dict],
@@ -389,14 +344,17 @@ def lock_overlays(words: List[dict], overlays: List[dict],
 
     extra: List[dict] = []
     if hook_lines:
+        # FIX v2.1: durasi hook dinaikkan (2.0→2.8 SHORT, 2.4→3.2 LONG)
         extra.append({
             "type": "kinetic_typo", "at": 0.15, "lines": hook_lines,
-            "dur": 2.4 if IS_LONG else 2.0, "sfx": "hit", "_fixed": True,
+            "dur": 3.2 if IS_LONG else 2.8, "sfx": "hit", "_fixed": True,
         })
     if cta_text:
+        # FIX v2.1: CTA naik posisinya (at=dur-3.2), durasi 3.0, flag _is_cta
         extra.append({
-            "type": "kinetic_typo", "at": max(0.0, dur - 2.8),
-            "lines": [cta_text], "dur": 2.6, "sfx": "hit", "_fixed": True,
+            "type": "kinetic_typo", "at": max(0.0, dur - 3.2),
+            "lines": [cta_text], "dur": 3.0, "sfx": "hit",
+            "_fixed": True, "_is_cta": True,
         })
 
     for o in extra + overlays:
@@ -440,17 +398,36 @@ def lock_overlays(words: List[dict], overlays: List[dict],
 
     ovs = kept
     ovs.sort(key=lambda o: o["t0"])
+
+    # FIX v2.1: durasi minimum + drop overlay non-fixed yang terlalu pendek
+    final_ovs: List[dict] = []
     for k, o in enumerate(ovs):
         o.pop("_fixed", None)
-        nxt = ovs[k + 1]["t0"] - 0.1 if k + 1 < len(ovs) else dur
-        o["t1"] = max(
-            min(o["t0"] + o.get("dur", default_dur.get(o["type"], 2.6)), nxt, dur),
-            o["t0"] + 0.3,
-        )
+        desired = o.get("dur", default_dur.get(o["type"], 2.6))
+        available = dur - o["t0"]
+        if k + 1 < len(ovs):
+            available = min(available, ovs[k + 1]["t0"] - o["t0"])
+        is_fixed = bool(o.get("_is_cta")) or bool(o.get("_from_tag"))
+
+        if available < 1.2 and not is_fixed:
+            # FIX: drop overlay non-fixed yang bakal jadi blip (< 1.2 dtk)
+            print(f"[overlay] DROP (durasi terlalu pendek {available:.2f}s): "
+                  f"{o['type']} @ {o['t0']:.1f}s")
+            continue
+
+        if is_fixed and available < 1.5:
+            # Fixed (hook/CTA/tag) dipaksa minimal 1.5 dtk (boleh overlap dikit)
+            available = 1.5
+
+        actual = min(desired, available)
+        o["t1"] = max(o["t0"] + actual, o["t0"] + 0.3)
+
         for it in o.get("items", []):
             if "abs" in it:
                 it["_t"] = max(0.0, it["abs"] - o["t0"])
-    return ovs
+        final_ovs.append(o)
+
+    return final_ovs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -458,14 +435,12 @@ def lock_overlays(words: List[dict], overlays: List[dict],
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _extract_claude_text(resp) -> str:
-    """Ambil teks balasan Claude (API mode)."""
     return "".join(
         b.text for b in resp.content if getattr(b, "type", "") == "text"
     ).strip()
 
 
 def _parse_json_loose(txt: str) -> dict:
-    """Parse JSON toleran terhadap pembungkus ```json ... ``` atau prefix/suffix."""
     txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt.strip())
     a, b = txt.find("{"), txt.rfind("}")
     assert a >= 0 and b > a, f"Balasan tidak berisi JSON: {txt[:200]}"
@@ -477,14 +452,11 @@ def _clean_hook_line(s: str) -> str:
 
 
 def _sanitize_plan(p: dict) -> dict:
-    """Normalisasi plan (dipakai API mode opsional)."""
     if not isinstance(p, dict):
         raise ValueError("Rencana bukan objek JSON")
 
     raw_scenes = p.get("scenes") or p.get("kalimat") or []
-    scenes = []
-    ovs = []
-    kw_pool = []
+    scenes, ovs, kw_pool = [], [], []
 
     for idx, sc in enumerate(raw_scenes, 1):
         if not isinstance(sc, dict):
@@ -512,12 +484,9 @@ def _sanitize_plan(p: dict) -> dict:
             kw_pool.append(kw.upper())
         if narasi:
             scenes.append({
-                "no": idx,
-                "narasi": narasi,
-                "visual_literal": visual_literal,
-                "keyword_cari": kw,
-                "skor_penting": skor,
-                "overlay": valid_ov,
+                "no": idx, "narasi": narasi,
+                "visual_literal": visual_literal, "keyword_cari": kw,
+                "skor_penting": skor, "overlay": valid_ov,
             })
 
     if not ovs:
@@ -534,12 +503,9 @@ def _sanitize_plan(p: dict) -> dict:
             re.sub(r"[^a-zA-Z0-9\s]", "", sc_fb["narasi"].lower()).split()[:4]
         )
         ov_fb = {
-            "type": "kinetic_typo",
-            "trigger": trig_fb or "fakta utama",
+            "type": "kinetic_typo", "trigger": trig_fb or "fakta utama",
             "kicker": "SOROTAN",
-            "lines": [
-                " ".join(sc_fb["narasi"].split()[:3]).upper() or "FAKTA UTAMA"
-            ],
+            "lines": [" ".join(sc_fb["narasi"].split()[:3]).upper() or "FAKTA UTAMA"],
             "alasan": "Sorotan utama otomatis",
         }
         sc_fb["overlay"] = ov_fb
@@ -560,16 +526,10 @@ def _sanitize_plan(p: dict) -> dict:
     return {
         "theme": cfg.safe_theme(p.get("theme", "")),
         "topic": str(p.get("topic") or "video"),
-        "hook_lines": [
-            _clean_hook_line(x)
-            for x in (p.get("hook_lines") or [])
-            if _clean_hook_line(x)
-        ][:3],
-        "fakta_konkret": [
-            str(x).strip()
-            for x in (p.get("fakta_konkret") or [])
-            if str(x).strip()
-        ][:5],
+        "hook_lines": [_clean_hook_line(x) for x in (p.get("hook_lines") or [])
+                       if _clean_hook_line(x)][:3],
+        "fakta_konkret": [str(x).strip() for x in (p.get("fakta_konkret") or [])
+                          if str(x).strip()][:5],
         "cta_pertanyaan": cta_q,
         "keywords": merged_kws,
         "scenes": scenes,
@@ -578,24 +538,18 @@ def _sanitize_plan(p: dict) -> dict:
 
 
 def _call_claude_api(client, prompt: str, model: str) -> dict:
-    """Panggil Claude API — hanya dipakai jika USE_API=1 (opt-in)."""
     resp = client.messages.create(
-        model=model,
-        max_tokens=8000,
+        model=model, max_tokens=8000,
         messages=[{"role": "user", "content": prompt}],
     )
     return _parse_json_loose(_extract_claude_text(resp))
 
 
 def run_auto_director(
-    client,
-    text: str,
-    style_note: str,
-    project_note: str,
+    client, text: str, style_note: str, project_note: str,
     model: str = "claude-sonnet-4-6",
     parsed_tags: Optional[Dict[str, Any]] = None,
 ) -> dict:
-    """Bangun plan dari teks narasi (offline default, API opt-in)."""
     if parsed_tags is None:
         parsed_tags = {}
 
@@ -638,7 +592,6 @@ def run_auto_director(
 
 
 def _overlays_from_scenes(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Ambil semua overlay non-null dari plan['scenes']."""
     if plan.get("overlays"):
         return list(plan["overlays"])
     out: List[Dict[str, Any]] = []
@@ -649,12 +602,7 @@ def _overlays_from_scenes(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 9. SCAN KLIP LOKAL
-# ═══════════════════════════════════════════════════════════════════════════
-
 def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) -> List[dict]:
-    """Scan gambar + video di proj_dir. Opsional ekstrak 4 frame per klip."""
     frames_root = os.path.join(work_dir, "frames")
     os.makedirs(frames_root, exist_ok=True)
     cands = [
@@ -696,27 +644,11 @@ def scan_local_clips(proj_dir: str, work_dir: str, extract_frames: bool = True) 
     return clips
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 10. VISION LABEL (STUB)
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _gemini_vision_label(frames: List[str], clip_name: str):
-    """v2 default: vision labeling OFF. Return None → pakai fallback nama file."""
     return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 11. LOCAL BROLL MATCHER
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _local_broll_matcher(kals: List[dict], klips: List[dict]) -> Dict[str, Any]:
-    """
-    Matcher klip offline — sequential ROUND-ROBIN atau keyword scoring.
-
-    v2.1 FIX: mode sequential sekarang pakai round-robin (idx % n_c),
-    bukan block assignment (int(idx * n_c / n_k)). Efek: kalimat berurutan
-    mendapat klip BERBEDA, tidak ada duplikat 3× berturut-turut.
-    """
     if not klips:
         return {"pilihan": []}
 
@@ -729,9 +661,6 @@ def _local_broll_matcher(kals: List[dict], klips: List[dict]) -> Dict[str, Any]:
         klips_sorted = sorted(klips, key=lambda x: x.get("nama_file", ""))
         n_c = len(klips_sorted)
         for idx, k in enumerate(kals):
-            # ── ROUND-ROBIN: idx % n_c ────────────────────────────────
-            # 15 kalimat, 6 klip → klip 0,1,2,3,4,5,0,1,2,3,4,5,0,1,2
-            # (bukan block: 0,0,0,1,1,1,2,2,2,3,3,3,4,4,4)
             c_idx = idx % n_c
             c = klips_sorted[c_idx]
             trig = " ".join(
@@ -786,20 +715,11 @@ def _local_broll_matcher(kals: List[dict], klips: List[dict]) -> Dict[str, Any]:
     return {"pilihan": pilihan}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 12. AUTO BROLL
-# ═══════════════════════════════════════════════════════════════════════════
-
 def run_auto_broll(
-    client,
-    clips: List[dict],
-    unit_texts: List[str],
-    words: List[dict],
-    proj_dir: str,
-    model: str = "claude-sonnet-4-6",
+    client, clips: List[dict], unit_texts: List[str], words: List[dict],
+    proj_dir: str, model: str = "claude-sonnet-4-6",
     scenes: Optional[List[dict]] = None,
 ) -> Dict[str, str]:
-    """Bangun peta kalimat → klip via matcher offline (default) atau API (opt-in)."""
     cache_p = os.path.join(proj_dir, "clip_labels.json")
     try:
         cache = json.load(open(cache_p, encoding="utf-8")) if os.path.exists(cache_p) else {}
@@ -814,25 +734,18 @@ def run_auto_broll(
             and cache[c["name"]].get("size") == sz
             and cache[c["name"]].get("deskripsi")
         ):
-            print("Cache label:", c["name"], "->",
-                  cache[c["name"]].get("deskripsi", "")[:60])
             continue
         try:
             out = _gemini_vision_label(c.get("frames") or [], c["name"])
             if out and out.get("deskripsi"):
                 cache[c["name"]] = {"size": sz, **out}
-                dirty = True
-                print("Label baru:", c["name"], "->", out.get("deskripsi", "")[:60])
             else:
                 clean_nm = re.sub(r"^\d+_", "", os.path.splitext(c["name"])[0]).replace("_", " ")
                 cache[c["name"]] = {
-                    "size": sz,
-                    "deskripsi": clean_nm,
-                    "tag": clean_nm.split(),
-                    "ada_orang": True,
-                    "wajah_jelas": False,
+                    "size": sz, "deskripsi": clean_nm, "tag": clean_nm.split(),
+                    "ada_orang": True, "wajah_jelas": False,
                 }
-                dirty = True
+            dirty = True
         except Exception as e:
             print(f"(!) Gagal label {c['name']}: {str(e)[:140]}")
             clean_nm = re.sub(r"^\d+_", "", os.path.splitext(c["name"])[0]).replace("_", " ")
@@ -906,8 +819,7 @@ def run_auto_broll(
             if trig:
                 hints[trig] = c["name"]
             scene_pairs.append({
-                "no": p.get("no"),
-                "kalimat": kal_txt,
+                "no": p.get("no"), "kalimat": kal_txt,
                 "klip": c["name"],
                 "alasan": str(p.get("alasan") or "").strip(),
             })
@@ -923,12 +835,7 @@ def run_auto_broll(
     return hints
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 13. APPLY EDIT COMMAND
-# ═══════════════════════════════════════════════════════════════════════════
-
 def apply_edit_command(state: dict, raw_cmd: str) -> dict:
-    """Format: '/perintah argumen' atau '/perintah | argumen'."""
     m = re.match(r"\s*(/\w+)\s*(?:\|\s*)?(.*)$", raw_cmd or "", re.S)
     if not m:
         return state
@@ -966,10 +873,7 @@ def apply_edit_command(state: dict, raw_cmd: str) -> dict:
         usable = state.get("usable_names", [])
         for chunk in arg.split(";"):
             chunk = chunk.strip()
-            if not chunk:
-                continue
-            if "=" not in chunk:
-                print(f"(!) /klip: '{chunk}' dilewati, format 'frasa=klip' atau 'nomor=klip'.")
+            if not chunk or "=" not in chunk:
                 continue
             k, v = [x.strip() for x in chunk.split("=", 1)]
             if not k or not v:
@@ -979,15 +883,10 @@ def apply_edit_command(state: dict, raw_cmd: str) -> dict:
                 or next((nm for nm in usable if v.lower() in nm.lower()), None)
             )
             if not matched_name:
-                print(f"(!) /klip: nama klip '{v}' tidak cocok.")
                 continue
             if k.isdigit():
                 idx = int(k)
-                if not items:
-                    print(f"(!) /klip: indeks {idx} tidak bisa dipakai, pakai 'frasa=klip'.")
-                    continue
-                if not 1 <= idx <= len(items):
-                    print(f"(!) /klip: indeks {idx} di luar rentang 1-{len(items)}.")
+                if not items or not 1 <= idx <= len(items):
                     continue
                 items[idx - 1] = (items[idx - 1][0], matched_name)
             else:
@@ -1005,12 +904,7 @@ def apply_edit_command(state: dict, raw_cmd: str) -> dict:
     return state
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 14. SFX SINTETIS
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _gen_sfx_hit(SR: int) -> np.ndarray:
-    """Kick-drum + noise transient — untuk kinetic_typo & stat_counter."""
     n = int(0.25 * SR)
     t = np.arange(n) / SR
     rng = np.random.default_rng(7)
@@ -1024,7 +918,6 @@ def _gen_sfx_hit(SR: int) -> np.ndarray:
 
 
 def _gen_sfx_whoosh(SR: int) -> np.ndarray:
-    """High-pass noise sweep — untuk roto_typo, camera_beat, draw_on."""
     n = int(0.55 * SR)
     t = np.arange(n) / SR
     rng = np.random.default_rng(11)
@@ -1037,7 +930,6 @@ def _gen_sfx_whoosh(SR: int) -> np.ndarray:
 
 
 def _gen_sfx_pop(SR: int) -> np.ndarray:
-    """Blip sine pendek — untuk marker_quote & floating_card."""
     n = int(0.15 * SR)
     t = np.arange(n) / SR
     pop = np.sin(2 * np.pi * 850 * t) * np.exp(-t / 0.018)
@@ -1049,7 +941,6 @@ def _gen_sfx_pop(SR: int) -> np.ndarray:
 
 
 def _build_sfx_stem(sfx_events: List[tuple], dur: float, SR: int) -> np.ndarray:
-    """Bangun stem mono dari list (t_sec, variant)."""
     stem = np.zeros(int(dur * SR) + SR, dtype=np.float32)
     cache: Dict[str, np.ndarray] = {}
     for t_ev, variant in sfx_events:
@@ -1068,12 +959,7 @@ def _build_sfx_stem(sfx_events: List[tuple], dur: float, SR: int) -> np.ndarray:
     return stem[:int(dur * SR)]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 15. CLEANUP HELPER
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _safe_rm(path: str) -> None:
-    """Hapus file/folder, abaikan error (untuk cleanup di GH Actions)."""
     try:
         if os.path.isfile(path):
             os.remove(path)
@@ -1084,16 +970,13 @@ def _safe_rm(path: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 16. RENDER FINAL VIDEO
+# 16. RENDER FINAL VIDEO — v2.1 (patch Batch A: set _rotoDisabled fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def render_final_video(
-    state: dict,
-    proj_dir: str,
-    work_dir: str,
+    state: dict, proj_dir: str, work_dir: str,
     remo_dir: str = REMOTION_DIR,
 ) -> str:
-    """Rakit video final: B-roll + overlay Remotion + subtitle + SFX + master audio."""
     os.makedirs(work_dir, exist_ok=True)
 
     vo_path = os.path.join(work_dir, "VO_padat.wav")
@@ -1329,7 +1212,6 @@ def render_final_video(
         "-f", "concat", "-safe", "0", "-i", list_txt,
         "-c", "copy", base_mp4])
 
-    # CLEANUP #1
     _safe_rm(shots_dir)
     _safe_rm(list_txt)
 
@@ -1402,8 +1284,14 @@ def render_final_video(
                     if extract_roto_layer(seg_mp4, roto_out, fps=FPS):
                         o["rotoSrc"] = roto_name
                         print(f"[roto] Layer subjek aktif: {roto_name}")
+                    else:
+                        # FIX v2.1: tandai fallback supaya Remotion render
+                        # sebagai KineticTypo, bukan RotoTypo (cegah layar hitam)
+                        o["_rotoDisabled"] = True
+                        print(f"[roto] Fallback ke teks biasa untuk overlay #{idx_ov + 1}")
                 except Exception as e:
-                    print(f"[roto] Gagal overlay #{idx_ov + 1}: {str(e)[:120]}")
+                    o["_rotoDisabled"] = True
+                    print(f"[roto] Gagal overlay #{idx_ov + 1}, fallback: {str(e)[:120]}")
 
     def render_overlay(glass):
         props = {
@@ -1538,11 +1426,8 @@ def render_final_video(
 __all__ = [
     "sh", "_concat_quote", "probe", "tighten_vo", "measure", "align_whisper",
     "DEFAULT_STYLE_NOTE", "THEMES", "ALLOWED_OVERLAY_TYPES",
-    "run_auto_director",
-    "scan_local_clips",
-    "run_auto_broll",
-    "apply_edit_command",
-    "render_final_video",
+    "run_auto_director", "scan_local_clips", "run_auto_broll",
+    "apply_edit_command", "render_final_video",
     "norm", "similar", "find_trigger",
     "still_to_clip", "prepare_still_clips",
     "cut_kind", "motion_filter",
