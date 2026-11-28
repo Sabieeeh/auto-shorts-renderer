@@ -1,14 +1,56 @@
-name: Render YouTube Shorts (Auto Director + Remotion)
+# ═══════════════════════════════════════════════════════════════════════════
+# render.yml — Workflow tunggal untuk render SHORT & LONG (auto-detect)
+# auto-shorts-renderer v2
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# CATATAN PENTING:
+#   - Workflow ini SATU-SATUNYA untuk render. `render_long.yml` SUDAH DIHAPUS.
+#   - Mode SHORT/LONG dideteksi OTOMATIS oleh main.py dari durasi VO padat:
+#       * VO ≤ 75 dtk → SHORT (1080×1920 vertikal)
+#       * VO > 75 dtk → LONG  (1920×1080 horizontal)
+#   - `VIDEO_MODE` TIDAK diset di sini — kalau diset, `main.py` akan mengabaikan
+#     deteksi otomatis dan memakai nilai env yang salah.
+#   - `timeout-minutes: 120` cukup untuk LONG ~10-15 menit di runner gratis
+#     (4 vCPU, 16 GB RAM, ~14 GB disk, tanpa GPU).
+#   - Cleanup di akhir job menghapus /tmp/work_proj & /tmp/remotion_overlay
+#     sebagai safety net agar disk tidak menumpuk.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# INPUT (dikirim dari Cloudflare Worker):
+#   folder_name : nama folder proyek di Google Drive
+#   mode        : plan | render | auto | edit
+#   theme       : auto | hutan | laut | api | malam | bumi
+#   note        : catatan tambahan (bisa berisi force:long / force:short)
+#   edit_cmd    : perintah /hapus /tema /hook /cta /klip /buang_klip
+#   chat_id     : override chat ID Telegram
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# SECRETS YANG WAJIB ADA (GitHub → Settings → Secrets and variables → Actions):
+#   TELEGRAM_BOT_TOKEN       : Bot A (approval & notif SHORT)
+#   TELEGRAM_CHAT_ID         : chat ID default
+#   TELEGRAM_TOKEN_LONG      : (opsional) Bot B untuk notif LONG — fallback ke Bot A
+#   GDRIVE_CLIENT_ID         : OAuth Drive (atau pakai SERVICE_ACCOUNT_JSON)
+#   GDRIVE_CLIENT_SECRET     : OAuth Drive
+#   GDRIVE_REFRESH_TOKEN     : OAuth Drive
+#   GDRIVE_SERVICE_ACCOUNT_JSON : (alternatif OAuth) JSON service account
+#
+#   OPSIONAL (tidak dibaca secara default — offline planner v2):
+#   ANTHROPIC_API_KEY        : hanya dipakai jika USE_API=1
+#   AUTO_MODEL               : nama model Claude (jika USE_API=1)
+#   USE_API                  : "1" untuk aktifkan planner API
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Render Video (Auto Director + Remotion)
 
 on:
   workflow_dispatch:
     inputs:
       folder_name:
-        description: 'Nama folder proyek di Google Drive (mis. BARU atau badak_jawa)'
+        description: 'Nama folder proyek di Google Drive (mis. BARU atau SABTU)'
         required: true
         type: string
       mode:
-        description: 'Mode eksekusi: plan (susun & minta setuju), render (eksekusi final), auto (langsung tanpa jeda), edit (ubah rencana)'
+        description: 'plan (susun & minta setuju) | render (final) | auto (langsung) | edit (ubah)'
         required: true
         default: 'plan'
         type: choice
@@ -30,12 +72,12 @@ on:
           - malam
           - bumi
       note:
-        description: 'Catatan khusus proyek (mis. koordinat pin map)'
+        description: 'Catatan khusus (mis. koordinat map, force:long, force:short)'
         required: false
         default: ''
         type: string
       edit_cmd:
-        description: 'Perintah edit dari Telegram (mis. /hapus 4, 6 atau /tema api)'
+        description: 'Perintah edit dari Telegram (mis. /hapus SABTU | 4, 6)'
         required: false
         default: ''
         type: string
@@ -45,19 +87,28 @@ on:
         default: ''
         type: string
 
+# ═══════════════════════════════════════════════════════════════════════════
+# CONCURRENCY: satu render per folder (SHORT & LONG tidak bisa overlap)
+# ═══════════════════════════════════════════════════════════════════════════
 concurrency:
   group: render-${{ github.event.inputs.folder_name }}
   cancel-in-progress: false
 
 jobs:
-  build-short:
+  build-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
 
     steps:
+      # ────────────────────────────────────────────────────────────────
+      # 1. CHECKOUT
+      # ────────────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ────────────────────────────────────────────────────────────────
+      # 2. SETUP RUNTIME
+      # ────────────────────────────────────────────────────────────────
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -69,26 +120,25 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install system packages (FFmpeg, Fonts, Chromium libs for Remotion)
+      - name: Install system packages (FFmpeg, Fonts, Chromium libs)
         run: |
+          set -e
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libcups2 libatk-bridge2.0-0 libxkbcommon-dev libxrandr2 libxfixes3 libxcomposite1 libxdamage1 libpango-1.0-0 libcairo2
+          sudo apt-get install -y -qq \
+            ffmpeg fonts-dejavu-core \
+            libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libcups2 \
+            libatk-bridge2.0-0 libxkbcommon-dev libxrandr2 libxfixes3 \
+            libxcomposite1 libxdamage1 libpango-1.0-0 libcairo2
           sudo apt-get install -y -qq libasound2t64 || sudo apt-get install -y -qq libasound2
 
+      # ────────────────────────────────────────────────────────────────
+      # 3. CACHE (Whisper model & node_modules Remotion)
+      # ────────────────────────────────────────────────────────────────
       - name: Cache HuggingFace Whisper models
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
           key: hf-whisper-${{ runner.os }}-small-v1
-
-      - name: Install Python dependencies
-        run: |
-          pip install --upgrade pip && pip install -q "rembg[cpu]" onnxruntime
-          pip install -r requirements.txt
-
-      - name: Setup & Cache Remotion environment
-        run: |
-          python -c "import remotion_builder; remotion_builder.prepare_remotion_project('/tmp/remotion_overlay')"
 
       - name: Cache Remotion node_modules
         id: cache-remotion
@@ -97,26 +147,102 @@ jobs:
           path: /tmp/remotion_overlay/node_modules
           key: remotion-nm-v2-${{ runner.os }}-4.0.352-gf1
 
-      - name: Install Remotion npm packages (jika belum ada di cache)
+      # ────────────────────────────────────────────────────────────────
+      # 4. INSTALL DEPENDENCIES
+      # ────────────────────────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          set -e
+          pip install --upgrade pip
+          pip install -q "rembg[cpu]" onnxruntime
+          pip install -r requirements.txt
+
+      - name: Setup Remotion project (pre-warm node_modules)
+        run: |
+          set -e
+          python -c "import remotion_builder; remotion_builder.prepare_remotion_project('/tmp/remotion_overlay')"
+
+      - name: Install Remotion npm packages (jika cache miss)
         if: steps.cache-remotion.outputs.cache-hit != 'true'
         run: |
-          cd /tmp/remotion_overlay && npm install --no-audit --no-fund && npm install --no-audit --no-fund @remotion/motion-blur@4.0.352 @remotion/paths@4.0.352 @remotion/transitions@4.0.352
+          set -e
+          cd /tmp/remotion_overlay
+          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund \
+            @remotion/motion-blur@4.0.352 \
+            @remotion/paths@4.0.352 \
+            @remotion/transitions@4.0.352
 
-      - name: Jalankan Pipeline Render
+      # ────────────────────────────────────────────────────────────────
+      # 5. RESOURCE MONITOR (SEBELUM RENDER)
+      # ────────────────────────────────────────────────────────────────
+      - name: Resource monitor — sebelum render
+        run: |
+          echo "═══════════════════════════════════════════════════════════"
+          echo "DISK SEBELUM RENDER:"
+          df -h /tmp /
+          echo ""
+          echo "MEMORI SEBELUM RENDER:"
+          free -h
+          echo ""
+          echo "CPU:"
+          nproc
+          echo "═══════════════════════════════════════════════════════════"
+
+      # ────────────────────────────────────────────────────────────────
+      # 6. JALANKAN PIPELINE
+      #    ⚠️ VIDEO_MODE SENGAJA TIDAK DISET — main.py yang menentukan
+      #       SHORT/LONG dari durasi VO (vo_dur > 75 → LONG).
+      # ────────────────────────────────────────────────────────────────
+      - name: Jalankan Pipeline (plan | render | auto | edit)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # ── Secrets (WAJIB) ────────────────────────────────────────
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # ── Secrets (B-1: Bot B untuk LONG) ────────────────────────
+          TELEGRAM_TOKEN_LONG: ${{ secrets.TELEGRAM_TOKEN_LONG }}
+          # ── Google Drive (WAJIB: OAuth trio ATAU Service Account)
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
           GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          # ── Input dari Cloudflare Worker ───────────────────────────
           INPUT_FOLDER_NAME: ${{ github.event.inputs.folder_name }}
           INPUT_MODE: ${{ github.event.inputs.mode }}
           INPUT_THEME: ${{ github.event.inputs.theme }}
           INPUT_NOTE: ${{ github.event.inputs.note }}
           INPUT_EDIT_CMD: ${{ github.event.inputs.edit_cmd }}
           INPUT_CHAT_ID: ${{ github.event.inputs.chat_id }}
+          # ── Opsional (tidak dibaca secara default) ─────────────────
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AUTO_MODEL: ${{ secrets.AUTO_MODEL }}
+          USE_API: ${{ vars.USE_API }}
+          RIG_OFF: ${{ vars.RIG_OFF }}
         run: |
+          set -e
           python main.py
+
+      # ────────────────────────────────────────────────────────────────
+      # 7. RESOURCE MONITOR (SESUDAH RENDER — untuk debug OOM/disk)
+      # ────────────────────────────────────────────────────────────────
+      - name: Resource monitor — sesudah render
+        if: always()
+        run: |
+          echo "═══════════════════════════════════════════════════════════"
+          echo "DISK SESUDAH RENDER:"
+          df -h /tmp /
+          echo ""
+          echo "MEMORI SESUDAH RENDER:"
+          free -h
+          echo "═══════════════════════════════════════════════════════════"
+
+      # ────────────────────────────────────────────────────────────────
+      # 8. CLEANUP AKHIR (SAFETY NET)
+      # ────────────────────────────────────────────────────────────────
+      - name: Cleanup akhir (safety net)
+        if: always()
+        run: |
+          echo "Membersihkan direktori sementara..."
+          rm -rf /tmp/work_proj 2>/dev/null || true
+          rm -rf /tmp/remotion_overlay 2>/dev/null || true
+          echo "Cleanup selesai."
