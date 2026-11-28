@@ -627,7 +627,6 @@ def _local_smart_plan(prompt: str) -> dict:
         kals = json.loads(m_kal.group(1)) if m_kal else []
         klips = json.loads(m_klip.group(1)) if m_klip else []
 
-        # Kunci urutan 01..60 secara kronologis jika mayoritas file berawalan nomor urut
         seq_count = sum(1 for c in klips if re.match(r"^\d{2,3}_", c.get("nama_file", "")))
         if klips and seq_count >= max(3, int(len(klips) * 0.7)):
             klips_sorted = sorted(klips, key=lambda x: x.get("nama_file", ""))
@@ -656,9 +655,20 @@ def _local_smart_plan(prompt: str) -> dict:
                 pilihan.append({"no": k.get("no", 1), "kalimat": k.get("kalimat", ""), "frasa_trigger": trig, "id_klip": best_c["id"], "alasan": f"Kecocokan kata kunci ({max(best_sc,1)} poin)"})
         return {"pilihan": pilihan}
 
-    # Mode 2: Sutradara Per Kalimat dari TRANSKRIP
-    m_trx = re.search(r"TRANSKRIP:\n(.*?)\n\nCATATAN GAYA", prompt, re.S)
-    trx = m_trx.group(1).strip() if m_trx else ""
+    # Mode 2: Sutradara Per Kalimat dari TRANSKRIP (tangkap semua variasi header prompt)
+    trx = ""
+    for pat in [
+        r"TRANSKRIP:\n(.*?)\n\n[A-Z_ ]+:",
+        r"TRANSKRIP[^\n]*:\n(.*?)\n\n",
+        r"TRANSKRIP[^\n]*:\n(.*)$",
+    ]:
+        m_trx = re.search(pat, prompt, re.S)
+        if m_trx and len(m_trx.group(1).strip()) > 10:
+            trx = m_trx.group(1).strip()
+            break
+    if not trx:
+        trx = prompt.strip().splitlines()[-1]
+
     sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", trx) if len(s.strip()) > 6]
     if not sents:
         sents = [trx]
@@ -674,7 +684,7 @@ def _local_smart_plan(prompt: str) -> dict:
         kws.append(kw.upper())
         nums = re.findall(r"\b\d{1,3}(?:[.,]\d{3})*\b", s)
         is_babak = bool(re.match(r"^babak\s+\d+", s.strip(), re.I))
-        skor = 5 if (is_babak or nums or "?" in s) else 2
+        skor = 5 if (is_babak or nums or "?" in s or idx in (1, len(sents))) else 2
         if nums or is_babak:
             facts.append(s[:110])
 
@@ -696,7 +706,14 @@ def _local_smart_plan(prompt: str) -> dict:
 
         scenes.append({"narasi": s, "visual_literal": f"Rekaman nyata: {kw}", "keyword_cari": kw, "skor_penting": skor, "overlay": ov})
 
-    first_w = [w.upper() for w in words_s[:4]] if not sents else [w.upper() for w in re.findall(r"[a-zA-Z]{4,}", sents[0]) if w.lower() not in stop][:4]
+    # Jaminan minimal 1 overlay valid agar run_auto_director tidak pernah menolak rencana
+    if not any(sc["overlay"] for sc in scenes) and scenes:
+        sc0 = scenes[0]
+        sc0["skor_penting"] = 5
+        trig0 = " ".join(re.sub(r"[^a-zA-Z0-9\s]", "", sc0["narasi"].lower()).split()[:4])
+        sc0["overlay"] = {"type": "marker_quote", "trigger": trig0, "badge": "FAKTA UTAMA", "text": " ".join(sc0["narasi"].split()[:6]).upper(), "alasan": "Sorotan pembuka"}
+
+    first_w = [w.upper() for w in re.findall(r"[a-zA-Z]{4,}", sents[0]) if w.lower() not in stop][:4]
     hook = [" ".join(first_w[:2]) or "TRAGEDI BADUY", " ".join(first_w[2:4]) or "FAKTA LAPANGAN"]
     cta = next((s for s in reversed(sents) if "?" in s), "Bagaimana pendapat Anda tentang kejadian ini?")
     return {"theme": "bumi", "topic": " ".join(first_w[:3]) or "DOKUMENTER BADUY", "hook_lines": hook, "fakta_konkret": facts[:4] or sents[:3], "cta_pertanyaan": cta, "keywords": list(dict.fromkeys(kws))[:8], "scenes": scenes}
