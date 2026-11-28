@@ -710,7 +710,13 @@ def _gemini_vision_label(frames: List[str], clip_name: str):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _local_broll_matcher(kals: List[dict], klips: List[dict]) -> Dict[str, Any]:
-    """Matcher klip offline — sequential atau keyword scoring."""
+    """
+    Matcher klip offline — sequential ROUND-ROBIN atau keyword scoring.
+
+    v2.1 FIX: mode sequential sekarang pakai round-robin (idx % n_c),
+    bukan block assignment (int(idx * n_c / n_k)). Efek: kalimat berurutan
+    mendapat klip BERBEDA, tidak ada duplikat 3× berturut-turut.
+    """
     if not klips:
         return {"pilihan": []}
 
@@ -721,10 +727,12 @@ def _local_broll_matcher(kals: List[dict], klips: List[dict]) -> Dict[str, Any]:
 
     if seq_count >= max(3, int(len(klips) * 0.7)):
         klips_sorted = sorted(klips, key=lambda x: x.get("nama_file", ""))
-        n_k = max(len(kals), 1)
         n_c = len(klips_sorted)
         for idx, k in enumerate(kals):
-            c_idx = min(int(idx * n_c / n_k), n_c - 1)
+            # ── ROUND-ROBIN: idx % n_c ────────────────────────────────
+            # 15 kalimat, 6 klip → klip 0,1,2,3,4,5,0,1,2,3,4,5,0,1,2
+            # (bukan block: 0,0,0,1,1,1,2,2,2,3,3,3,4,4,4)
+            c_idx = idx % n_c
             c = klips_sorted[c_idx]
             trig = " ".join(
                 re.sub(r"[^a-zA-Z0-9\s]", "", k.get("kalimat", "").lower()).split()[:4]
@@ -734,7 +742,7 @@ def _local_broll_matcher(kals: List[dict], klips: List[dict]) -> Dict[str, Any]:
                 "kalimat": k.get("kalimat", ""),
                 "frasa_trigger": trig,
                 "id_klip": c["id"],
-                "alasan": f"Urutan kronologis #{c_idx + 1:02d}",
+                "alasan": f"Round-robin #{c_idx + 1:02d}",
             })
         return {"pilihan": pilihan}
 
